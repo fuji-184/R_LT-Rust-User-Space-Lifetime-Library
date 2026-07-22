@@ -31,6 +31,7 @@ use lifetime::lt;
 fn main() {
     let val = lt!(vec![1, 2, 3], "my_data");
     let ptr = lt!(val.as_ptr(), "my_data");
+    drop(val);
     unsafe { println!("{}", *ptr); }
 }
 ```
@@ -61,6 +62,7 @@ use lifetime::lt;
 fn main() {
     let val = lt!(vec![1, 2, 3], "my_data");
     let ptr = lt!(val.as_ptr(), "my_data");
+    drop(val);
     unsafe { println!("{}", *ptr); }
 }
 ```
