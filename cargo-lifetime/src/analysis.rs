@@ -245,13 +245,25 @@ fn parse_lt_let(code: &str) -> Option<(String, String, String)> {
         return None;
     }
     let rest = &c[4..];
-    let eq = rest.find('=')?;
-    let var = rest[..eq].trim();
-    if !is_ident(var) {
-        return None;
+    let mut word = rest.trim_start();
+    loop {
+        let end = word
+            .find(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+            .unwrap_or(word.len());
+        let token = &word[..end];
+        if token == "mut" || token == "ref" {
+            word = word[end..].trim_start();
+            continue;
+        }
+        if token.is_empty() || !is_ident(token) {
+            return None;
+        }
+        let eq = word[end..].find('=')?;
+        let var = token.to_string();
+        let after = word[end + eq + 1..].trim();
+        return extract_lt_expr_label(after)
+            .map(|(expr, label)| (var, expr, label));
     }
-    let after = rest[eq + 1..].trim();
-    extract_lt_expr_label(after).map(|(expr, label)| (var.to_string(), expr, label))
 }
 
 fn parse_let(code: &str) -> Option<String> {
@@ -399,7 +411,11 @@ fn is_pointer_expr(e: &str) -> bool {
         || e.starts_with("Rc::as_ptr(")
         || e.starts_with("std::rc::Rc::as_ptr(")
         || e.starts_with("Arc::as_ptr(")
-        || e.starts_with("std::sync::Arc::as_ptr(");
+        || e.starts_with("std::sync::Arc::as_ptr(")
+        || e.starts_with("NonNull::new(")
+        || e.starts_with("std::ptr::NonNull::new(")
+        || e.starts_with("NonNull::new_unchecked(")
+        || e.starts_with("std::ptr::NonNull::new_unchecked(");
     let ends = e.ends_with(".as_ptr()")
         || e.ends_with(".as_mut_ptr()")
         || e.ends_with(".as_ref()")
