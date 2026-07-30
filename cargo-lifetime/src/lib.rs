@@ -378,12 +378,18 @@ fn cfg_predicate_has_test(pred: &str) -> bool {
 }
 
 fn strip_line_comment<'a>(s: &'a str) -> &'a str {
-    if let Some(pos) = s.find("//") {
-        let before = &s[..pos].trim_end();
-        if before.is_empty() { "" } else { before }
-    } else {
-        s
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut in_str = false;
+    while i < bytes.len() {
+        if bytes[i] == b'"' { in_str = !in_str; }
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i+1] == b'/' && !in_str {
+            let before = s[..i].trim_end();
+            if before.is_empty() { return ""; } else { return before; }
+        }
+        i += 1;
     }
+    s
 }
 
 fn has_unclosed_lt(s: &str) -> bool {
@@ -829,6 +835,14 @@ fn collect_identifiers_from_pattern(s: &str) -> Vec<String> {
                     else if chars[j] == close { depth -= 1; }
                     j += 1;
                 }
+                let mut peek = i;
+                while peek > 0 && chars[peek - 1].is_whitespace() { peek -= 1; }
+                if peek > 0 {
+                    let mut start = peek - 1;
+                    while start > 0 && (chars[start - 1].is_ascii_alphanumeric() || chars[start - 1] == '_') { start -= 1; }
+                    let name: String = chars[start..peek].iter().collect();
+                    if vars.last().map_or(false, |v| v == &name) { vars.pop(); }
+                }
                 let inner: String = chars[i + 1..j - 1].iter().collect();
                 for part in split_top_level_commas(&inner) {
                     vars.extend(collect_identifiers_from_pattern(part.trim()));
@@ -843,16 +857,26 @@ fn collect_identifiers_from_pattern(s: &str) -> Vec<String> {
                     else if chars[j] == '}' { depth -= 1; }
                     j += 1;
                 }
+                let mut peek = i;
+                while peek > 0 && chars[peek - 1].is_whitespace() { peek -= 1; }
+                if peek > 0 {
+                    let mut start = peek - 1;
+                    while start > 0 && (chars[start - 1].is_ascii_alphanumeric() || chars[start - 1] == '_') { start -= 1; }
+                    let name: String = chars[start..peek].iter().collect();
+                    if vars.last().map_or(false, |v| v == &name) { vars.pop(); }
+                }
                 let inner: String = chars[i + 1..j - 1].iter().collect();
-                for field in inner.split(',') {
+                for field in split_top_level_commas(&inner) {
                     let field = field.trim();
                     if let Some(eq_pos) = field.find(':') {
                         let val = field[eq_pos + 1..].trim();
-                        if val.starts_with('{') {
-                            vars.extend(collect_identifiers_from_pattern(val));
-                        } else if is_ident(val) {
-                            vars.push(val.to_string());
-                        }
+                if val.starts_with('{') {
+                        vars.extend(collect_identifiers_from_pattern(val));
+                    } else if let Some(inner_start) = val.find('{') {
+                        vars.extend(collect_identifiers_from_pattern(&val[inner_start..]));
+                    } else if is_ident(val) {
+                        vars.push(val.to_string());
+                    }
                     } else if !field.is_empty() && is_ident(field) {
                         vars.push(field.to_string());
                     }
@@ -1723,5 +1747,351 @@ mod tests {
     fn test_parse_destructure_assign_skips_match_arm() {
         assert_eq!(parse_destructure_assign("Some(x) => x"), None,
                    "match arm => should not be treated as destructure assign");
+    }
+
+    // --- has_unclosed_lt ---
+
+    #[test]
+    fn test_has_unclosed_lt_balanced() {
+        assert!(!has_unclosed_lt("lt!(val.as_ptr(), \"l\")"),
+                "balanced lt!() should return false");
+    }
+
+    #[test]
+    fn test_has_unclosed_lt_unclosed() {
+        assert!(has_unclosed_lt("lt!(val.as_ptr(), \"l\""),
+                "unclosed lt!( should return true");
+    }
+
+    #[test]
+    fn test_has_unclosed_lt_string_ignores_lt() {
+        assert!(!has_unclosed_lt("\"lt!(inside a string\""),
+                "lt!( inside a string should be ignored");
+    }
+
+    #[test]
+    fn test_has_unclosed_lt_nested() {
+        assert!(!has_unclosed_lt("lt!(foo(lt!(bar)), \"l\")"),
+                "nested lt!() should be handled");
+    }
+
+    #[test]
+    fn test_has_unclosed_lt_no_lt_call() {
+        assert!(!has_unclosed_lt("let x = 1;"),
+                "code without lt! should return false");
+    }
+
+    // --- join_lt_lines ---
+
+    #[test]
+    fn test_join_lt_lines_single_line() {
+        let result = join_lt_lines("let val = lt!(vec![1], \"l\");");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].1, "let val = lt!(vec![1], \"l\");");
+    }
+
+    #[test]
+    fn test_join_lt_lines_multi_line() {
+        let src = "let val = lt!(vec![1],\n\"l\");";
+        let result = join_lt_lines(src);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, 1, "line number should be the first line");
+        assert!(result[0].1.contains("lt!(vec![1],"), "joined line should contain lt!(");
+        assert!(result[0].1.contains("\"l\")"), "joined line should contain label");
+    }
+
+    #[test]
+    fn test_join_lt_lines_no_lt() {
+        let src = "let x = 1;\nlet y = 2;";
+        let result = join_lt_lines(src);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_join_lt_lines_lt_in_string() {
+        let src = "let s = \"lt!(\nstill string\n)\";";
+        let result = join_lt_lines(src);
+        assert_eq!(result.len(), 3, "lt!( inside string should not trigger joining");
+    }
+
+    // --- strip_line_comment ---
+
+    #[test]
+    fn test_strip_line_comment_removes_comment() {
+        assert_eq!(strip_line_comment("let x = 1; // comment"), "let x = 1;");
+    }
+
+    #[test]
+    fn test_strip_line_comment_no_comment() {
+        assert_eq!(strip_line_comment("let x = 1;"), "let x = 1;");
+    }
+
+    #[test]
+    fn test_strip_line_comment_in_string() {
+        assert_eq!(strip_line_comment("\"hello // world\""), "\"hello // world\"");
+    }
+
+    #[test]
+    fn test_strip_line_comment_just_comment() {
+        assert_eq!(strip_line_comment("// only comment"), "");
+    }
+
+    // --- builtin_safe_fn ---
+
+    #[test]
+    fn test_builtin_safe_fn_known() {
+        assert!(builtin_safe_fn("as_ptr"));
+        assert!(builtin_safe_fn("as_mut_ptr"));
+        assert!(builtin_safe_fn("len"));
+        assert!(builtin_safe_fn("is_empty"));
+        assert!(builtin_safe_fn("capacity"));
+    }
+
+    #[test]
+    fn test_builtin_safe_fn_unknown() {
+        assert!(!builtin_safe_fn("my_custom_fn"));
+        assert!(!builtin_safe_fn("foo"));
+    }
+
+    // --- builtin_pointer_expr ---
+
+    #[test]
+    fn test_builtin_pointer_expr_known() {
+        assert!(builtin_pointer_expr("&raw const"));
+        assert!(builtin_pointer_expr("&raw mut "));
+        assert!(builtin_pointer_expr("Box::into_raw("));
+        assert!(builtin_pointer_expr(".as_ptr()"));
+        assert!(builtin_pointer_expr(".as_mut_ptr()"));
+    }
+
+    #[test]
+    fn test_builtin_pointer_expr_unknown() {
+        assert!(!builtin_pointer_expr("foo"));
+        assert!(!builtin_pointer_expr("bar"));
+    }
+
+    // --- check_source_with_config ---
+
+    #[test]
+    fn test_check_source_two_lt_on_same_line() {
+        let errors = check_source_with_config(
+            "let a = lt!(vec![1], \"l\"); let b = lt!(vec![2], \"l\");",
+            &Config::default(),
+        );
+        assert!(errors.is_empty(), "two lt!() on same line should be fine: {:?}", errors);
+    }
+
+    #[test]
+    fn test_check_source_lt_with_for() {
+        let errors = check_source_with_config(
+            "for a in &vec { lt!(a, \"l\"); }",
+            &Config::default(),
+        );
+        assert!(errors.is_empty(), "lt!() in for loop should work: {:?}", errors);
+    }
+
+    #[test]
+    fn test_check_source_lt_with_if_let() {
+        let errors = check_source_with_config(
+            "if let Some(a) = opt { lt!(a, \"l\"); }",
+            &Config::default(),
+        );
+        assert!(errors.is_empty(), "lt!() in if let should work: {:?}", errors);
+    }
+
+    // --- parse_lt_let ---
+
+    #[test]
+    fn test_parse_lt_let_basic() {
+        let result = parse_lt_let("let x = lt!(vec![1], \"l\")");
+        assert_eq!(result, Some(("x".to_string(), "vec![1]".to_string(), "l".to_string())));
+    }
+
+    #[test]
+    fn test_parse_lt_let_with_mut() {
+        let result = parse_lt_let("let mut x = lt!(vec![1], \"l\")");
+        assert_eq!(result, Some(("x".to_string(), "vec![1]".to_string(), "l".to_string())));
+    }
+
+    #[test]
+    fn test_parse_lt_let_nested_expr() {
+        let result = parse_lt_let("let val = lt!(Box::new(vec![1, 2, 3]), \"l\")");
+        assert!(result.is_some());
+        assert_eq!(result.as_ref().unwrap().0, "val");
+        assert!(result.unwrap().1.contains("Box::new("));
+    }
+
+    #[test]
+    fn test_parse_lt_let_no_lt() {
+        assert_eq!(parse_lt_let("let x = 1"), None);
+    }
+
+    #[test]
+    fn test_parse_lt_let_not_let() {
+        assert_eq!(parse_lt_let("x = lt!(val, \"l\")"), None);
+    }
+
+    // --- parse_lt_assign ---
+
+    #[test]
+    fn test_parse_lt_assign_basic() {
+        let result = parse_lt_assign("x = lt!(val, \"l\")");
+        assert_eq!(result, Some(("x".to_string(), "val".to_string(), "l".to_string())));
+    }
+
+    #[test]
+    fn test_parse_lt_assign_skips_let() {
+        assert_eq!(parse_lt_assign("let x = lt!(val, \"l\")"), None);
+    }
+
+    #[test]
+    fn test_parse_lt_assign_not_ident() {
+        assert_eq!(parse_lt_assign("123 = lt!(val, \"l\")"), None);
+    }
+
+    // --- parse_destructure with enum variants ---
+
+    #[test]
+    fn test_parse_destructure_some_variant() {
+        let vars = parse_destructure("let Some(x) = opt").unwrap();
+        assert_eq!(vars, vec!["x"]);
+    }
+
+    #[test]
+    fn test_parse_destructure_ok_variant() {
+        let vars = parse_destructure("let Ok(val) = res").unwrap();
+        assert_eq!(vars, vec!["val"]);
+    }
+
+    #[test]
+    fn test_parse_destructure_err_variant() {
+        let vars = parse_destructure("let Err(e) = res").unwrap();
+        assert_eq!(vars, vec!["e"]);
+    }
+
+    // --- check_source scope boundary errors ---
+
+    #[test]
+    fn test_check_source_exit_scope_with_active_borrow() {
+        let src = "{\nlet val = lt!(vec![1], \"l\");\nlet p = lt!(val.as_ptr(), \"l\");\n}\n";
+        let errors = check_source_with_config(src, &Config::default());
+        assert!(errors.is_empty(),
+                "owner and borrow dropped together at scope exit should be ok");
+    }
+
+    #[test]
+    fn test_check_source_borrow_outlives_owner() {
+        let src = "let p;\n{\nlet val = lt!(vec![1], \"l\");\np = lt!(val.as_ptr(), \"l\");\n}\n";
+        let errors = check_source_with_config(src, &Config::default());
+        assert!(!errors.is_empty(),
+                "borrow in outer scope outliving inner owner should error");
+    }
+
+    #[test]
+    fn test_check_source_drop_with_active_borrow() {
+        let src = "let val = lt!(vec![1], \"l\"); let p = lt!(val.as_ptr(), \"l\");\ndrop(val);";
+        let errors = check_source_with_config(src, &Config::default());
+        assert!(!errors.is_empty(),
+                "drop() while borrow active should error");
+    }
+
+    #[test]
+    fn test_check_source_drop_no_borrow_ok() {
+        let src = "let val = lt!(vec![1], \"l\"); drop(val);";
+        let errors = check_source_with_config(src, &Config::default());
+        assert!(errors.is_empty(),
+                "drop() without active borrow should be ok");
+    }
+
+    // --- find_matching_paren edge cases ---
+
+    #[test]
+    fn test_find_matching_paren_unclosed() {
+        assert_eq!(find_matching_paren("(abc", 0), None,
+                   "unclosed paren should return None");
+    }
+
+    #[test]
+    fn test_find_matching_paren_non_paren_start() {
+        assert_eq!(find_matching_paren("abc(de)f", 0), None,
+                   "start at non-( should return None");
+    }
+
+    #[test]
+    fn test_find_matching_paren_empty_parens() {
+        assert_eq!(find_matching_paren("()", 0), Some(1));
+    }
+
+    // --- smart_split edge cases ---
+
+    #[test]
+    fn test_smart_split_empty() {
+        assert!(smart_split("").is_empty(),
+                "empty string should produce empty vec");
+    }
+
+    #[test]
+    fn test_smart_split_only_semicolon() {
+        assert!(smart_split(";").is_empty(),
+                "only semicolon should produce empty vec");
+    }
+
+    #[test]
+    fn test_smart_split_only_comment() {
+        let parts = smart_split("// comment");
+        assert_eq!(parts, vec!["// comment"],
+                   "// without ; is treated as a single segment");
+    }
+
+    #[test]
+    fn test_smart_split_trailing_semicolon() {
+        let parts = smart_split("a; b;");
+        assert_eq!(parts, vec!["a", "b"],
+                   "trailing ; should not produce empty segment");
+    }
+
+    // --- split_top_level_commas edge cases ---
+
+    #[test]
+    fn test_split_top_level_commas_unclosed_comment() {
+        let parts = split_top_level_commas("a /* unclosed");
+        assert!(parts.is_empty(),
+                "unclosed block comment should return empty vec");
+    }
+
+    #[test]
+    fn test_split_top_level_commas_empty() {
+        let parts = split_top_level_commas("");
+        assert_eq!(parts, vec![""],
+                   "empty string should return vec with single empty string");
+    }
+
+    // --- collect_identifiers_from_pattern — nested ---
+
+    #[test]
+    fn test_collect_identifiers_from_pattern_nested_struct() {
+        let vars = collect_identifiers_from_pattern("Outer { inner: Inner { x, y }, z }");
+        assert_eq!(vars, vec!["x", "y", "z"],
+                   "nested struct fields should all be collected");
+    }
+
+    // --- adjust_line_in_msg ---
+
+    #[test]
+    fn test_adjust_line_in_msg_no_adjustment() {
+        let msg = "used here, (declared at line 5)";
+        assert_eq!(adjust_line_in_msg(msg, 0), "used here, (declared at line 5)");
+    }
+
+    #[test]
+    fn test_adjust_line_in_msg_subtract() {
+        let msg = "used here, (declared at line 5)";
+        assert_eq!(adjust_line_in_msg(msg, 2), "used here, (declared at line 3)");
+    }
+
+    #[test]
+    fn test_adjust_line_in_msg_no_declaration() {
+        let msg = "some error without line reference";
+        assert_eq!(adjust_line_in_msg(msg, 5), "some error without line reference");
     }
 }
