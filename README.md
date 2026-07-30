@@ -17,8 +17,10 @@ lifetime = { git = "https://github.com/fuji-184/R_LT-Rust-User-Space-Lifetime-Li
 
 ### 2. Install CLI tool
 
+Installs only the CLI binary — no test code included:
+
 ```bash
-cargo install --path cargo-lifetime
+cargo install --git https://github.com/fuji-184/R_LT-Rust-User-Space-Lifetime-Library lifetime-cli
 ```
 
 Or from a local checkout:
