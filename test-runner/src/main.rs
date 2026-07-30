@@ -3,7 +3,14 @@ use lifetime_cli::*;
 const LINE_OFFSET: usize = 1;
 
 fn run_tests() {
-    let test_dir = format!("{}/../tests", env!("CARGO_MANIFEST_DIR"));
+    let test_dir = {
+        let from_manifest = format!("{}/../tests", env!("CARGO_MANIFEST_DIR"));
+        if std::path::Path::new(&from_manifest).exists() {
+            from_manifest
+        } else {
+            "tests".to_string()
+        }
+    };
     let mut cases: Vec<_> = std::fs::read_dir(&test_dir)
         .unwrap()
         .filter_map(|e| e.ok())

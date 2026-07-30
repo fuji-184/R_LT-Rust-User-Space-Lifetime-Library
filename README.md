@@ -17,8 +17,16 @@ lifetime = { git = "https://github.com/fuji-184/R_LT-Rust-User-Space-Lifetime-Li
 
 ### 2. Install CLI tool
 
+Installs only the CLI binary — no test code included:
+
 ```bash
 cargo install --git https://github.com/fuji-184/R_LT-Rust-User-Space-Lifetime-Library
+```
+
+Or from a local checkout:
+
+```bash
+cargo install --path cargo-lifetime
 ```
 
 ### 3. Annotate your code
@@ -124,16 +132,20 @@ It compiles away to nothing — all checking happens at analysis time.
 ## CLI
 
 ```bash
+cargo lifetime                      Show usage info
 cargo lifetime check                Auto-detect & traverse modules from src/main.rs or src/lib.rs
 cargo lifetime check --file <path>  Check a specific file only (no module traversal)
 ```
 
 ## Development
 
+The test runner lives in its own crate so CLI users never pull in test code.
+
 ```bash
 cargo run -p lifetime-test-runner                          Run test suite (54 tests)
 cargo run -p lifetime-cli -- check                         Check project (traverse all modules)
 cargo run -p lifetime-cli -- check --file <path>           Check a single file
+cargo run -p lifetime-cli                                  Show usage info
 ```
 
 ## Project structure

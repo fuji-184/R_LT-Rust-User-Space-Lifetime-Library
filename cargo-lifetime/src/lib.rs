@@ -7,25 +7,144 @@ pub const GREEN: &str = "\x1b[1;32m";
 pub const DIM: &str = "\x1b[2m";
 pub const RESET: &str = "\x1b[0m";
 
-pub fn check_source(src: &str) -> Vec<(usize, String)> {
-    let mut sc = Scanner::new();
+const KEYWORDS: &[&str] = &[
+    "as", "async", "await", "break", "continue", "else", "for", "if",
+    "in", "let", "loop", "match", "return", "where", "while", "yield",
+    "move", "ref", "mut",
+];
+
+fn has_unclosed_lt(s: &str) -> bool {
+    let mut in_str = false;
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < s.len() {
+        if bytes[i] == b'"' {
+            in_str = !in_str;
+            i += 1;
+            continue;
+        }
+        if in_str {
+            i += 1;
+            continue;
+        }
+        if i + 4 <= s.len() && &s[i..i + 4] == "lt!(" {
+            let mut depth: isize = 1;
+            let mut j = i + 4;
+            let mut found_close = false;
+            while j < s.len() {
+                match bytes[j] {
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            found_close = true;
+                            j += 1;
+                            break;
+                        }
+                    }
+                    b'"' => {
+                        j += 1;
+                        while j < s.len() && bytes[j] != b'"' {
+                            if bytes[j] == b'\\' { j += 1; }
+                            j += 1;
+                        }
+                        if j < s.len() { j += 1; }
+                        continue;
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            if !found_close {
+                return true;
+            }
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn join_lt_lines(src: &str) -> Vec<(usize, String)> {
+    let mut result = Vec::new();
+    let mut pending: Option<(usize, String)> = None;
 
     for (i, raw) in src.lines().enumerate() {
         let line_num = i + 1;
-        let s = raw.trim();
-        if s.is_empty() || s.starts_with("//") {
+        let s = raw.to_string();
+
+        if let Some((first_line, mut acc)) = pending.take() {
+            acc.push('\n');
+            acc.push_str(&s);
+            if !has_unclosed_lt(&acc) {
+                result.push((first_line, acc));
+            } else {
+                pending = Some((first_line, acc));
+            }
             continue;
         }
+
+        if has_unclosed_lt(&s) {
+            pending = Some((line_num, s));
+        } else {
+            result.push((line_num, s));
+        }
+    }
+
+    if let Some(p) = pending {
+        result.push(p);
+    }
+
+    result
+}
+
+fn strip_comment(s: &str) -> &str {
+    if let Some(pos) = s.find("//") {
+        let before = &s[..pos].trim_end();
+        if before.is_empty() { "" } else { before }
+    } else {
+        s
+    }
+}
+
+pub fn check_source(src: &str) -> Vec<(usize, String)> {
+    let mut sc = Scanner::new();
+    let lines = join_lt_lines(src);
+
+    for &(line_num, ref raw) in &lines {
+        let s = raw.trim();
+        if s.is_empty() {
+            continue;
+        }
+
         if s.starts_with("#[cfg(test)]") {
-            break;
+            let rest = s["#[cfg(test)]".len()..].trim();
+            if rest.is_empty() {
+                continue;
+            }
         }
 
         let mut seg_start = 0;
+        let mut in_str = false;
         for (j, ch) in s.char_indices() {
+            if ch == '"' {
+                in_str = !in_str;
+                continue;
+            }
+            if in_str {
+                continue;
+            }
             if ch == '}' || ch == '{' {
                 let seg = s[seg_start..j].trim();
+                let seg = strip_comment(seg);
                 if !seg.is_empty() {
-                    sc.analyze_segment(seg, line_num);
+                    for sub in seg.split(';') {
+                        let sub = sub.trim();
+                        if !sub.is_empty() {
+                            sc.analyze_segment(sub, line_num);
+                        }
+                    }
                 }
                 if ch == '}' {
                     sc.exit_scope(line_num);
@@ -37,8 +156,14 @@ pub fn check_source(src: &str) -> Vec<(usize, String)> {
             }
         }
         let seg = s[seg_start..].trim();
+        let seg = strip_comment(seg);
         if !seg.is_empty() {
-            sc.analyze_segment(seg, line_num);
+            for sub in seg.split(';') {
+                let sub = sub.trim();
+                if !sub.is_empty() {
+                    sc.analyze_segment(sub, line_num);
+                }
+            }
         }
     }
 
@@ -147,6 +272,8 @@ impl Scanner {
 
     fn analyze_segment(&mut self, code: &str, line: usize) {
         if let Some((var, expr, label)) = parse_lt_let(code) {
+            self.owners.retain(|o| !(o.var == var && o.depth == self.depth));
+            self.borrows.retain(|b| !(b.var == var && b.depth == self.depth));
             self.var_depth.insert(var.clone(), self.depth);
             if is_pointer_expr(&expr) {
                 self.borrows.push(Borrow { var, label, line, depth: self.depth });
@@ -156,7 +283,25 @@ impl Scanner {
             return;
         }
 
+        if let Some(vars) = parse_destructure(code) {
+            for var in vars {
+                self.owners.retain(|o| !(o.var == var && o.depth == self.depth));
+                self.borrows.retain(|b| !(b.var == var && b.depth == self.depth));
+                self.var_depth.insert(var, self.depth);
+            }
+            return;
+        }
+
         if let Some(var) = parse_let(code) {
+            self.owners.retain(|o| !(o.var == var && o.depth == self.depth));
+            self.borrows.retain(|b| !(b.var == var && b.depth == self.depth));
+            self.var_depth.insert(var, self.depth);
+            return;
+        }
+
+        if let Some(var) = parse_for(code) {
+            self.owners.retain(|o| !(o.var == var && o.depth == self.depth));
+            self.borrows.retain(|b| !(b.var == var && b.depth == self.depth));
             self.var_depth.insert(var, self.depth);
             return;
         }
@@ -221,6 +366,9 @@ impl Scanner {
             return;
         }
         if is_safe_fn(fn_name) {
+            return;
+        }
+        if KEYWORDS.contains(&fn_name) {
             return;
         }
         let args = match extract_paren_body(&c[lparen..]) {
@@ -363,6 +511,83 @@ fn parse_let(code: &str) -> Option<String> {
     }
 }
 
+fn parse_for(code: &str) -> Option<String> {
+    let c = code.trim();
+    if !c.starts_with("for ") {
+        return None;
+    }
+    let rest = &c[4..].trim_start();
+    if rest.is_empty() {
+        return None;
+    }
+    let next = rest.split(|ch: char| ch.is_whitespace() || ch == '(').next()?;
+    if is_ident(next) {
+        Some(next.to_string())
+    } else {
+        None
+    }
+}
+
+fn parse_destructure(code: &str) -> Option<Vec<String>> {
+    let c = code.trim();
+    if !c.starts_with("let ") {
+        return None;
+    }
+    let mut rest = &c[4..];
+    loop {
+        let trimmed = rest.trim_start();
+        if trimmed.starts_with("mut ") {
+            rest = &trimmed[4..];
+        } else if trimmed.starts_with("ref ") {
+            rest = &trimmed[4..];
+        } else {
+            rest = trimmed;
+            break;
+        }
+    }
+    if rest.is_empty() {
+        return None;
+    }
+
+    let mut vars = Vec::new();
+
+    if rest.starts_with('(') {
+        if let Some(body) = extract_paren_body(rest) {
+            for part in split_top_level_commas(body) {
+                let part = part.trim();
+                if is_ident(part) {
+                    vars.push(part.to_string());
+                }
+            }
+        }
+    } else if rest.starts_with("Some(") || rest.starts_with("Ok(") || rest.starts_with("Err(") {
+        let paren_start = rest.find('(')?;
+        if let Some(body) = extract_paren_body(&rest[paren_start..]) {
+            let body = body.trim();
+            if is_ident(body) {
+                vars.push(body.to_string());
+            }
+        }
+    } else if rest.starts_with('&') {
+        let after_ref = rest[1..].trim_start();
+        if after_ref.starts_with("mut ") {
+            let after_mut = &after_ref[4..].trim_start();
+            if after_mut.starts_with('(') {
+                return parse_destructure(&format!("let {}", after_mut));
+            }
+            if is_ident(after_mut) {
+                vars.push(after_mut.to_string());
+            }
+        } else if after_ref.starts_with('(') {
+            return parse_destructure(&format!("let {}", after_ref));
+        } else if is_ident(after_ref) {
+            vars.push(after_ref.to_string());
+        }
+    }
+
+    if vars.is_empty() { None } else { Some(vars) }
+}
+
 fn parse_lt_assign(code: &str) -> Option<(String, String, String)> {
     let c = code.trim();
     if c.starts_with("let ") {
@@ -472,6 +697,10 @@ fn is_safe_fn(name: &str) -> bool {
             | "debug_assert" | "debug_assert_eq" | "debug_assert_ne"
             | "panic" | "unreachable" | "unimplemented" | "todo"
             | "dbg" | "stringify" | "concat"
+            | "Vec::new" | "vec" | "Box::new" | "Rc::new" | "Arc::new"
+            | "String::new" | "String::from" | "format!"
+            | "Some" | "Ok" | "Err" | "None"
+            | "std::mem::drop" | "mem::drop" | "drop"
     )
 }
 
