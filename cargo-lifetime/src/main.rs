@@ -86,16 +86,35 @@ fn find_inline_modules(src: &str) -> Vec<(String, String)> {
 }
 
 fn check_project(config: &Config) -> Vec<(String, usize, String)> {
-    let entry = if std::path::Path::new("src/main.rs").exists() {
-        "src/main.rs".to_string()
-    } else if std::path::Path::new("src/lib.rs").exists() {
-        "src/lib.rs".to_string()
+    let entry_path = if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
+        let main = std::path::Path::new(&manifest).join("src/main.rs");
+        let lib = std::path::Path::new(&manifest).join("src/lib.rs");
+        if main.exists() {
+            main
+        } else if lib.exists() {
+            lib
+        } else {
+            return Vec::new();
+        }
     } else {
-        return Vec::new();
+        let root = std::env::current_dir().unwrap_or_default();
+        let mut dir = root.as_path();
+        loop {
+            let main = dir.join("src/main.rs");
+            if main.exists() { break main; }
+            let lib = dir.join("src/lib.rs");
+            if lib.exists() { break lib; }
+            if let Some(parent) = dir.parent() {
+                dir = parent;
+            } else {
+                return Vec::new();
+            }
+        }
     };
 
     let mut all = Vec::new();
     let mut seen = HashSet::<String>::new();
+    let entry = entry_path.to_string_lossy().into_owned();
     let mut stack = vec![entry];
 
     while let Some(path) = stack.pop() {
