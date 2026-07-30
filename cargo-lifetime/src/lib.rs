@@ -73,6 +73,7 @@ impl Config {
             })?;
             let key = line[..colon].trim();
             let value = line[colon + 1..].trim();
+            let value = value.splitn(2, '#').next().unwrap_or("").trim();
             match key {
                 "safe_fn" => config.extra_safe_fns.push(value.to_string()),
                 "prefix" => config.extra_pointer_prefixes.push(value.to_string()),
@@ -291,7 +292,7 @@ pub fn check_source_with_config(src: &str, config: &Config) -> Vec<(usize, Strin
         let mut in_str = false;
         let mut in_block_comment: isize = 0;
         for (j, ch) in s.char_indices() {
-            if ch == '"' { in_str = !in_str; continue; }
+            if ch == '"' { if j > 0 && s.as_bytes()[j - 1] == b'\\' { continue; } in_str = !in_str; continue; }
             if in_str { continue; }
 
             if ch == '/' {
@@ -382,7 +383,7 @@ fn strip_line_comment<'a>(s: &'a str) -> &'a str {
     let mut i = 0;
     let mut in_str = false;
     while i < bytes.len() {
-        if bytes[i] == b'"' { in_str = !in_str; }
+        if bytes[i] == b'"' { if i > 0 && bytes[i - 1] == b'\\' { i += 1; continue; } in_str = !in_str; }
         if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i+1] == b'/' && !in_str {
             let before = s[..i].trim_end();
             if before.is_empty() { return ""; } else { return before; }
@@ -397,7 +398,7 @@ fn has_unclosed_lt(s: &str) -> bool {
     let mut i = 0;
     let chars: Vec<char> = s.chars().collect();
     while i < chars.len() {
-        if chars[i] == '"' { in_str = !in_str; i += 1; continue; }
+        if chars[i] == '"' { if i > 0 && chars[i - 1] == '\\' { i += 1; continue; } in_str = !in_str; i += 1; continue; }
         if in_str { i += 1; continue; }
         if i + 4 <= chars.len() && chars[i] == 'l' && chars[i+1] == 't' && chars[i+2] == '!' && chars[i+3] == '(' {
             match find_matching_paren(s, i + 3) {
@@ -764,6 +765,7 @@ fn parse_lt_let(code: &str) -> Option<(String, String, String)> {
     let rest = &c[4..];
     let mut word = rest.trim_start();
     loop {
+        if word.starts_with('&') { word = word[1..].trim_start(); continue; }
         let end = word.find(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_').unwrap_or(word.len());
         let token = &word[..end];
         if token == "mut" || token == "ref" {
@@ -784,6 +786,7 @@ fn parse_let(code: &str) -> Option<String> {
     let rest = &c[4..];
     let mut word = rest.trim_start();
     loop {
+        if word.starts_with('&') { word = word[1..].trim_start(); continue; }
         let end = word.find(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_').unwrap_or(word.len());
         let token = &word[..end];
         if token == "mut" || token == "ref" {
@@ -895,7 +898,7 @@ fn collect_identifiers_from_pattern(s: &str) -> Vec<String> {
                     continue;
                 }
                 if end < chars.len() && chars[end] == '!' { i = end + 1; continue; }
-                if name != "_" && is_ident(&name) {
+                if name != "_" && name != "ref" && name != "mut" && is_ident(&name) {
                     vars.push(name);
                 }
                 i = end;
@@ -2093,5 +2096,103 @@ mod tests {
     fn test_adjust_line_in_msg_no_declaration() {
         let msg = "some error without line reference";
         assert_eq!(adjust_line_in_msg(msg, 5), "some error without line reference");
+    }
+
+    // =============================================
+    // Escaped quote \" handling in string parsers
+    // =============================================
+
+    #[test]
+    fn test_strip_line_comment_escaped_quote() {
+        assert_eq!(strip_line_comment(r#" "hello \" world" // comment"#),
+                   r#" "hello \" world""#,
+                   "escaped quote should not end the string early");
+    }
+
+    #[test]
+    fn test_has_unclosed_lt_escaped_quote() {
+        assert!(!has_unclosed_lt(r#"let s = "lt!( \" );"#),
+                "lt!( after escaped quote should be inside string");
+    }
+
+    #[test]
+    fn test_check_source_escaped_quote_brace_in_string() {
+        let src = r#"{ let val = lt!(vec![1], "l"); let s = "hello \" } world"; let p = lt!(val.as_ptr(), "l"); my_fn(val); }"#;
+        let errors = check_source_with_config(src, &Config::default());
+        assert!(!errors.is_empty(),
+                "escaped quote inside string should prevent }} from closing scope early");
+    }
+
+    #[test]
+    fn test_check_source_escaped_quote_in_str() {
+        let src = r#"let val = lt!(vec![1], "l"); let p = lt!(val.as_ptr(), "l"); let s = "hello \" world"; my_fn(val);"#;
+        let errors = check_source_with_config(src, &Config::default());
+        assert!(!errors.is_empty(),
+                "escaped quote in string should not break owner tracking");
+    }
+
+    // =============================================
+    // let &x reference pattern
+    // =============================================
+
+    #[test]
+    fn test_parse_let_ref_pattern() {
+        assert_eq!(parse_let("let &x = val"), Some("x".to_string()));
+    }
+
+    #[test]
+    fn test_parse_let_ref_mut_pattern() {
+        assert_eq!(parse_let("let &mut x = val"), Some("x".to_string()));
+    }
+
+    #[test]
+    fn test_parse_lt_let_ref_pattern() {
+        let result = parse_lt_let(r#"let &x = lt!(vec![1], "l")"#);
+        assert_eq!(result, Some(("x".to_string(), "vec![1]".to_string(), "l".to_string())));
+    }
+
+    // =============================================
+    // ref/mut keywords not collected as variables
+    // =============================================
+
+    #[test]
+    fn test_collect_identifiers_from_pattern_skips_ref() {
+        let vars = collect_identifiers_from_pattern("(ref x, y)");
+        assert_eq!(vars, vec!["x", "y"],
+                   "ref should not be collected as a variable");
+    }
+
+    #[test]
+    fn test_collect_identifiers_from_pattern_skips_mut() {
+        let vars = collect_identifiers_from_pattern("[mut a, b]");
+        assert_eq!(vars, vec!["a", "b"],
+                   "mut should not be collected as a variable");
+    }
+
+    // =============================================
+    // Config trailing # comment
+    // =============================================
+
+    #[test]
+    fn test_config_load_trailing_comment() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("_test_lifetime_config_comment.toml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(f, "safe_fn: my_fn # this is a comment\nprefix: Ptr::new( # comment\n").unwrap();
+        let c = Config::load(path.to_str().unwrap()).unwrap();
+        assert!(c.is_safe_fn("my_fn"), "my_fn should be loaded, not 'my_fn # this is a comment'");
+        assert!(c.is_pointer_expr("Ptr::new(x)"), "Ptr::new should be loaded");
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn test_config_load_comment_with_hash_in_value() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("_test_lifetime_config_no_comment.toml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(f, "safe_fn: fn_1\n").unwrap();
+        let c = Config::load(path.to_str().unwrap()).unwrap();
+        assert!(c.is_safe_fn("fn_1"), "value without # should be loaded as-is");
+        std::fs::remove_file(&path).unwrap();
     }
 }
