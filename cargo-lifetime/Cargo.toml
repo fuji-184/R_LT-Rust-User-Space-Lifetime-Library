@@ -3,6 +3,10 @@ name = "lifetime-cli"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "lifetime_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "cargo-lifetime"
 path = "src/main.rs"

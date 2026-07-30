@@ -9,3 +9,10 @@ version = "0.1.0"
 [[package]]
 name = "lifetime-cli"
 version = "0.1.0"
+
+[[package]]
+name = "lifetime-test-runner"
+version = "0.1.0"
+dependencies = [
+ "lifetime-cli",
+]

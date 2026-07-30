@@ -1,5 +1,12 @@
 use std::collections::HashMap;
 
+pub const CYAN: &str = "\x1b[1;36m";
+pub const YELLOW: &str = "\x1b[1;33m";
+pub const RED: &str = "\x1b[1;31m";
+pub const GREEN: &str = "\x1b[1;32m";
+pub const DIM: &str = "\x1b[2m";
+pub const RESET: &str = "\x1b[0m";
+
 pub fn check_source(src: &str) -> Vec<(usize, String)> {
     let mut sc = Scanner::new();
 
@@ -36,6 +43,73 @@ pub fn check_source(src: &str) -> Vec<(usize, String)> {
     }
 
     std::mem::take(&mut sc.errors)
+}
+
+pub fn pline(path: &str, line: usize, msg: &str) {
+    println!("{CYAN}{path}:{line}:{RESET} {}", colorize(msg));
+}
+
+pub fn adjust_line_in_msg(msg: &str, n: usize) -> String {
+    let mut r = String::new();
+    let mut rest = msg;
+    while let Some(start) = rest.find("(declared at line ") {
+        r.push_str(&rest[..start]);
+        r.push_str("(declared at line ");
+        let off = start + "(declared at line ".len();
+        let end = rest[off..].find(')').map(|e| off + e).unwrap_or(rest.len());
+        let raw: usize = rest[off..end].parse().unwrap_or(1);
+        r.push_str(&raw.saturating_sub(n).to_string());
+        r.push(')');
+        rest = &rest[end + 1..];
+    }
+    r.push_str(rest);
+    r
+}
+
+pub fn print_file_errors(path: &str, errors: &[(usize, String)]) {
+    for (line, msg) in errors {
+        pline(path, *line, msg);
+    }
+}
+
+fn colorize(msg: &str) -> String {
+    let mut r = String::new();
+    let mut i = 0;
+    let b = msg.as_bytes();
+    while i < b.len() {
+        if b[i] == b'[' {
+            if let Some(end) = msg[i..].find(']') {
+                r.push_str(YELLOW);
+                r.push_str(&msg[i..=i + end]);
+                r.push_str(RESET);
+                i += end + 1;
+                continue;
+            }
+        }
+        if b[i] == b'`' {
+            if let Some(end) = msg[i + 1..].find('`') {
+                r.push('`');
+                r.push_str(CYAN);
+                r.push_str(&msg[i + 1..=i + end]);
+                r.push_str(RESET);
+                r.push('`');
+                i += end + 2;
+                continue;
+            }
+        }
+        if msg[i..].starts_with("(declared at line ") {
+            if let Some(end) = msg[i..].find(')') {
+                r.push_str(DIM);
+                r.push_str(&msg[i..=i + end]);
+                r.push_str(RESET);
+                i += end + 1;
+                continue;
+            }
+        }
+        r.push(msg[i..].chars().next().unwrap());
+        i += msg[i..].chars().next().unwrap().len_utf8();
+    }
+    r
 }
 
 struct Owner {
@@ -433,7 +507,7 @@ fn is_pointer_expr(e: &str) -> bool {
     starts || ends
 }
 
-fn is_ident(s: &str) -> bool {
+pub fn is_ident(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }

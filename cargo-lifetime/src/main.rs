@@ -1,74 +1,5 @@
-include!("analysis.rs");
-
-const LINE_OFFSET: usize = 1;
-
-const CYAN: &str = "\x1b[1;36m";
-const YELLOW: &str = "\x1b[1;33m";
-const RED: &str = "\x1b[1;31m";
-const GREEN: &str = "\x1b[1;32m";
-const DIM: &str = "\x1b[2m";
-const RESET: &str = "\x1b[0m";
-
-fn colorize(msg: &str) -> String {
-    let mut r = String::new();
-    let mut i = 0;
-    let b = msg.as_bytes();
-    while i < b.len() {
-        if b[i] == b'[' {
-            if let Some(end) = msg[i..].find(']') {
-                r.push_str(YELLOW);
-                r.push_str(&msg[i..=i + end]);
-                r.push_str(RESET);
-                i += end + 1;
-                continue;
-            }
-        }
-        if b[i] == b'`' {
-            if let Some(end) = msg[i + 1..].find('`') {
-                r.push('`');
-                r.push_str(CYAN);
-                r.push_str(&msg[i + 1..=i + end]);
-                r.push_str(RESET);
-                r.push('`');
-                i += end + 2;
-                continue;
-            }
-        }
-        if msg[i..].starts_with("(declared at line ") {
-            if let Some(end) = msg[i..].find(')') {
-                r.push_str(DIM);
-                r.push_str(&msg[i..=i + end]);
-                r.push_str(RESET);
-                i += end + 1;
-                continue;
-            }
-        }
-        r.push(msg[i..].chars().next().unwrap());
-        i += msg[i..].chars().next().unwrap().len_utf8();
-    }
-    r
-}
-
-fn pline(path: &str, line: usize, msg: &str) {
-    println!("{CYAN}{path}:{line}:{RESET} {}", colorize(msg));
-}
-
-fn adjust_line_in_msg(msg: &str, n: usize) -> String {
-    let mut r = String::new();
-    let mut rest = msg;
-    while let Some(start) = rest.find("(declared at line ") {
-        r.push_str(&rest[..start]);
-        r.push_str("(declared at line ");
-        let off = start + "(declared at line ".len();
-        let end = rest[off..].find(')').map(|e| off + e).unwrap_or(rest.len());
-        let raw: usize = rest[off..end].parse().unwrap_or(1);
-        r.push_str(&raw.saturating_sub(n).to_string());
-        r.push(')');
-        rest = &rest[end + 1..];
-    }
-    r.push_str(rest);
-    r
-}
+use lifetime_cli::*;
+use std::collections::HashSet;
 
 fn check_file(path: &str) -> Vec<(usize, String)> {
     let src = std::fs::read_to_string(path).unwrap();
@@ -115,7 +46,7 @@ fn check_project() -> Vec<(String, usize, String)> {
     };
 
     let mut all = Vec::new();
-    let mut seen = std::collections::HashSet::<String>::new();
+    let mut seen = HashSet::<String>::new();
     let mut stack = vec![entry];
 
     while let Some(path) = stack.pop() {
@@ -142,82 +73,9 @@ fn check_project() -> Vec<(String, usize, String)> {
     all
 }
 
-fn run_tests() {
-    let test_dir = format!("{}/../tests", env!("CARGO_MANIFEST_DIR"));
-    let mut cases: Vec<_> = std::fs::read_dir(&test_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map(|s| s == "rs").unwrap_or(false))
-        .collect();
-    cases.sort_by_key(|e| e.file_name());
-
-    let results: Vec<(String, Vec<(usize, String)>, bool)> = std::thread::scope(|s| {
-        let mut handles = Vec::with_capacity(cases.len());
-
-        for entry in &cases {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let body = std::fs::read_to_string(entry.path()).unwrap();
-            let body_line_count = body.lines().count();
-            let expect_err = name.starts_with("invalid_");
-
-            handles.push(s.spawn(move || {
-                let src = format!(
-                    r#"macro_rules! lt {{ ($e:expr, $l:expr) => {{ $e }}; }}
-fn main() {{ {} }}"#,
-                    body
-                );
-                let errors = check_source(&src);
-                let errors: Vec<(usize, String)> = errors
-                    .into_iter()
-                    .map(|(line, msg)| {
-                        let orig = if line > LINE_OFFSET {
-                            (line - LINE_OFFSET).min(body_line_count)
-                        } else {
-                            1
-                        };
-                        let msg = adjust_line_in_msg(&msg, LINE_OFFSET);
-                        (orig, msg)
-                    })
-                    .collect();
-                let ok = if expect_err { !errors.is_empty() } else { errors.is_empty() };
-                (name, errors, ok)
-            }));
-        }
-
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
-
-    let mut pass = 0u32;
-    let mut fail = 0u32;
-
-    for (name, errors, ok) in &results {
-        if *ok {
-            println!("  {GREEN}PASS{RESET}  tests/{name}");
-            pass += 1;
-        } else {
-            println!("  {RED}FAIL{RESET}  tests/{name}");
-            fail += 1;
-        }
-        for (line, msg) in errors {
-            print!("        ");
-            pline(name, *line, msg);
-        }
-    }
-
-    let total = pass + fail;
-    let n_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    if fail > 0 {
-        println!("---\n{GREEN}{pass}{RESET}/{total} passed, {RED}{fail}{RESET} failed  [{n_cores} cores]");
-        std::process::exit(1);
-    } else {
-        println!("---\n{GREEN}{pass}{RESET}/{total} passed, {RED}{fail}{RESET} failed  [{n_cores} cores]");
-    }
-}
-
-fn print_file_errors(path: &str, errors: &[(usize, String)]) {
-    for (line, msg) in errors {
-        pline(path, *line, msg);
-    }
+fn print_usage() {
+    eprintln!("Usage: cargo lifetime check [--file <path>]");
+    eprintln!("       cargo lifetime check <path>");
 }
 
 fn main() {
@@ -253,6 +111,9 @@ fn main() {
                 }
             }
         }
-        _ => run_tests(),
+        _ => {
+            print_usage();
+            std::process::exit(1);
+        }
     }
 }

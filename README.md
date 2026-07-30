@@ -131,7 +131,7 @@ cargo lifetime check --file <path>  Check a specific file only (no module traver
 ## Development
 
 ```bash
-cargo run -p lifetime-cli                                  Run test suite (54 tests)
+cargo run -p lifetime-test-runner                          Run test suite (54 tests)
 cargo run -p lifetime-cli -- check                         Check project (traverse all modules)
 cargo run -p lifetime-cli -- check --file <path>           Check a single file
 ```
@@ -142,8 +142,10 @@ cargo run -p lifetime-cli -- check --file <path>           Check a single file
 Cargo.toml           Workspace root
 lifetime/            Library crate: just the lt! identity macro (zero-cost, no analysis)
   src/lib.rs
-cargo-lifetime/      CLI crate: analysis engine + cargo-lifetime binary + test runner
-  src/main.rs
-  src/analysis.rs
+cargo-lifetime/      CLI crate: analysis engine + cargo-lifetime binary
+  src/lib.rs         Library: analysis engine + shared utilities
+  src/main.rs        CLI binary: check subcommand only
+test-runner/         Standalone test runner (separate from CLI)
+  src/main.rs        Runs all 54 test fixtures
 tests/               Test fixtures (valid_*.rs → zero violations, invalid_*.rs → violations expected)
 ```
