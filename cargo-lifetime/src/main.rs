@@ -139,6 +139,21 @@ fn print_usage() {
     eprintln!("  cargo lifetime --help                    Show this help");
 }
 
+fn skip_cargo_subcommand(args: &[String]) -> &[String] {
+    let mut i = 1;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "check" || a == "--help" || a == "-h" {
+            break;
+        }
+        if a.starts_with('-') {
+            break;
+        }
+        i += 1;
+    }
+    &args[i.saturating_sub(1)..]
+}
+
 fn main() {
     let raw: Vec<String> = std::env::args().collect();
     let config = match lifetime_cli::load_config(&raw) {
@@ -159,6 +174,8 @@ fn main() {
     } else {
         config
     };
+
+    let args = skip_cargo_subcommand(&args);
 
     match args.get(1).map(|s| s.as_str()) {
         Some("--help") | Some("-h") => {
