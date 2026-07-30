@@ -240,9 +240,8 @@ fn smart_split(s: &str) -> Vec<String> {
             }
             '/' if i + 1 < chars.len() => {
                 if chars[i + 1] == '/' {
-                    let seg: String = s[start..i].trim().to_string();
-                    if !seg.is_empty() { parts.push(seg); }
-                    return parts;
+                    while i < chars.len() && chars[i] != '\n' { i += 1; }
+                    continue;
                 }
                 if chars[i + 1] == '*' {
                     i += 2;
@@ -358,7 +357,13 @@ fn strip_cfg_test<'a>(s: &'a str) -> Option<&'a str> {
 fn cfg_predicate_has_test(pred: &str) -> bool {
     let pred = pred.trim();
     if pred == "test" { return true; }
-    if pred.starts_with("not(") { return false; }
+    if pred.starts_with("not(") {
+        if let Some(end) = find_matching_paren(pred, 3) {
+            let inner = pred[4..end].trim();
+            return !cfg_predicate_has_test(inner);
+        }
+        return false;
+    }
     if pred.starts_with("all(") || pred.starts_with("any(") {
         let paren = pred.find('(').unwrap_or(0);
         if let Some(end) = find_matching_paren(pred, paren) {
@@ -1574,5 +1579,85 @@ mod tests {
         let result = extract_lt_expr_label(r#"lt!(val.as_ptr() /* , */, "l")"#);
         assert_eq!(result, Some(("val.as_ptr() /* , */".to_string(), "l".to_string())),
                    "comma inside /* */ should not split the body");
+    }
+
+    // =============================================
+    // More edge-case tests that may fail
+    // =============================================
+
+    #[test]
+    fn test_smart_split_semicolon_in_line_comment() {
+        let parts = smart_split("a; // ; \n b");
+        assert_eq!(parts, vec!["a", "// ; \n b"],
+                   "; inside // should not split");
+    }
+
+    #[test]
+    fn test_smart_split_semicolon_in_block_comment() {
+        let parts = smart_split("a; /* ; */ b");
+        assert_eq!(parts, vec!["a", "/* ; */ b"],
+                   "; inside /* */ should not split");
+    }
+
+    #[test]
+    fn test_is_ident_raw_identifier() {
+        assert!(!is_ident("r#foo"),
+                "raw ident r#foo should not match is_ident (or should we handle it?)");
+    }
+
+    #[test]
+    fn test_block_comment_should_not_trigger_owner_check() {
+        let src = "let val = lt!(vec![1], \"l\");\nlet p = lt!(val.as_ptr(), \"l\");\n/* some_fn(val) */\n";
+        let errors = check_source_with_config(src, &Config::default());
+        assert!(errors.is_empty(), "owner inside /* */ should not be checked");
+    }
+
+    #[test]
+    fn test_lt_inside_block_comment_should_not_track() {
+        let src = "let val = lt!(vec![1], \"l\");\n/* let p = lt!(val.as_ptr(), \"l\"); */\nmy_fn(val);\n";
+        let errors = check_source_with_config(src, &Config::default());
+        assert!(errors.is_empty(),
+                "lt! inside /* */ should not create borrow, so my_fn(val) is safe");
+    }
+
+    #[test]
+    fn test_collect_identifiers_from_pattern_double_quote_in_string() {
+        let vars = collect_identifiers_from_pattern(r#"("a\"b", c)"#);
+        assert_eq!(vars, vec!["c"],
+                   "escaped quote in string should not create ident");
+    }
+
+    #[test]
+    fn test_find_matching_paren_line_comment_contains_paren() {
+        assert_eq!(find_matching_paren("(// )\n)", 0), Some(6),
+                   "// comment with ) should not close the paren");
+    }
+
+    #[test]
+    fn test_cfg_predicate_has_test_double_not() {
+        assert!(cfg_predicate_has_test("not(not(test))"),
+                "not(not(test)) == test, should be true");
+    }
+
+    #[test]
+    fn test_extract_lt_expr_label_empty_label() {
+        assert_eq!(extract_lt_expr_label(r#"lt!(val, "")"#),
+                   Some(("val".to_string(), "".to_string())),
+                   "empty string label should be allowed");
+    }
+
+    #[test]
+    fn test_find_non_relational_eq_after_if() {
+        let s = "if x = 1 { }";
+        assert_eq!(find_non_relational_eq(s), Some(5),
+                   "= after if is still assignment");
+    }
+
+    #[test]
+    fn test_check_source_with_config_closure() {
+        let src = "let val = lt!(vec![1], \"l\");\nlet f = || { let _ = val; };\n";
+        let errors = check_source_with_config(src, &Config::default());
+        assert!(errors.is_empty(),
+                "borrow inside closure should be ok");
     }
 }
