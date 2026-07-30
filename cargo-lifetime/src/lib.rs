@@ -368,7 +368,7 @@ fn cfg_predicate_has_test(pred: &str) -> bool {
             false
         }
     } else {
-        pred.contains("test")
+        false
     }
 }
 
@@ -696,24 +696,54 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
     let mut depth_bracket: isize = 0;
     let mut depth_brace: isize = 0;
     let mut in_str = false;
-    for (i, ch) in s.char_indices() {
-        match ch {
-            '"' => in_str = !in_str,
-            _ if in_str => {}
-            '(' => depth_paren += 1,
-            ')' => depth_paren -= 1,
-            '[' => depth_bracket += 1,
-            ']' => depth_bracket -= 1,
-            '{' => depth_brace += 1,
-            '}' => depth_brace -= 1,
-            ',' if depth_paren == 0 && depth_bracket == 0 && depth_brace == 0 => {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if in_str {
+            if bytes[i] == b'"' { in_str = false; }
+            else if bytes[i] == b'\\' { i += 1; }
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            in_str = true;
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < bytes.len() {
+            if bytes[i + 1] == b'/' {
+                let end = s[i..].find('\n').map(|p| i + p).unwrap_or(bytes.len());
+                i = end;
+                continue;
+            }
+            if bytes[i + 1] == b'*' {
+                if let Some(end) = s[i + 2..].find("*/") {
+                    i = i + 2 + end + 2;
+                    continue;
+                } else {
+                    parts.clear();
+                    return parts;
+                }
+            }
+        }
+        match bytes[i] {
+            b'(' => depth_paren += 1,
+            b')' => depth_paren -= 1,
+            b'[' => depth_bracket += 1,
+            b']' => depth_bracket -= 1,
+            b'{' => depth_brace += 1,
+            b'}' => depth_brace -= 1,
+            b',' if depth_paren == 0 && depth_bracket == 0 && depth_brace == 0 => {
                 parts.push(&s[start..i]);
                 start = i + 1;
             }
             _ => {}
         }
+        i += 1;
     }
-    parts.push(&s[start..]);
+    if start <= bytes.len() {
+        parts.push(&s[start..]);
+    }
     parts
 }
 
@@ -901,17 +931,40 @@ fn parse_lt_assign(code: &str) -> Option<(String, String, String)> {
 }
 
 fn find_non_relational_eq(s: &str) -> Option<usize> {
-    let mut in_str = false;
-    for (i, ch) in s.char_indices() {
-        if ch == '"' { in_str = !in_str; }
-        else if !in_str && ch == '=' {
-            if i > 0 {
-                let prev = s.as_bytes()[i - 1];
-                if prev == b'!' || prev == b'<' || prev == b'>' || prev == b'=' { continue; }
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'"' {
+                if bytes[i] == b'\\' { i += 1; }
+                i += 1;
             }
-            if s.as_bytes().get(i + 1) == Some(&b'=') { continue; }
+            if i < bytes.len() { i += 1; }
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < bytes.len() {
+            if bytes[i + 1] == b'/' {
+                let end = s[i..].find('\n').map(|p| i + p).unwrap_or(bytes.len());
+                i = end;
+                continue;
+            }
+            if bytes[i + 1] == b'*' {
+                if let Some(end) = s[i + 2..].find("*/") {
+                    i = i + 2 + end + 2;
+                    continue;
+                } else { return None; }
+            }
+        }
+        if bytes[i] == b'=' {
+            if i > 0 {
+                let prev = bytes[i - 1];
+                if prev == b'!' || prev == b'<' || prev == b'>' || prev == b'=' { i += 1; continue; }
+            }
+            if bytes.get(i + 1) == Some(&b'=') { i += 2; continue; }
             return Some(i);
         }
+        i += 1;
     }
     None
 }
@@ -929,19 +982,40 @@ fn extract_lt_expr_label(s: &str) -> Option<(String, String)> {
 }
 
 fn find_last_comma(s: &str) -> Option<usize> {
-    let mut in_str = false;
+    let bytes = s.as_bytes();
     let mut nest: isize = 0;
     let mut last = None;
-    for (i, ch) in s.char_indices() {
-        if ch == '"' { in_str = !in_str; }
-        else if !in_str {
-            match ch {
-                '(' | '[' | '{' => nest += 1,
-                ')' | ']' | '}' => nest -= 1,
-                ',' if nest == 0 => last = Some(i),
-                _ => {}
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'"' {
+                if bytes[i] == b'\\' { i += 1; }
+                i += 1;
+            }
+            if i >= bytes.len() { return None; }
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < bytes.len() {
+            if bytes[i + 1] == b'/' {
+                let end = s[i..].find('\n').map(|p| i + p).unwrap_or(bytes.len());
+                i = end;
+                continue;
+            }
+            if bytes[i + 1] == b'*' {
+                let end = s[i + 2..].find("*/").map(|p| i + 2 + p + 2)?;
+                i = end;
+                continue;
             }
         }
+        match bytes[i] {
+            b'(' | b'[' | b'{' => nest += 1,
+            b')' | b']' | b'}' => nest -= 1,
+            b',' if nest == 0 => last = Some(i),
+            _ => {}
+        }
+        i += 1;
     }
     last
 }
@@ -1435,5 +1509,70 @@ mod tests {
         let args = vec!["prog".to_string(), "--config".to_string()];
         let result = load_config(&args);
         assert!(result.is_err());
+    }
+
+    // =============================================
+    // Tests that expose bugs / unhandled edge cases
+    // =============================================
+
+    #[test]
+    fn test_split_top_level_commas_escaped_quote() {
+        let parts = split_top_level_commas(r#"a, "b\"c", d"#);
+        assert_eq!(parts, vec!["a", r#" "b\"c""#, " d"]);
+    }
+
+    #[test]
+    fn test_cfg_predicate_has_test_not_test_exact() {
+        assert!(!cfg_predicate_has_test("testing"), "testing is not test");
+        assert!(!cfg_predicate_has_test("attest"), "attest is not test");
+    }
+
+    #[test]
+    fn test_find_last_comma_skips_comment() {
+        let s = "val.as_ptr() /* , */ \"l\"";
+        assert_eq!(find_last_comma(s), None,
+                   "comma inside /* */ should be ignored, no real comma exists");
+    }
+
+    #[test]
+    fn test_find_last_comma_skips_line_comment() {
+        let s = "val.as_ptr() // ,\n \"l\"";
+        assert_eq!(find_last_comma(s), None,
+                   "comma inside // should be ignored, no real comma exists");
+    }
+
+    #[test]
+    fn test_find_non_relational_eq_skips_block_comment() {
+        let s = "x /* = */ 1";
+        assert_eq!(find_non_relational_eq(s), None,
+                   "= inside /* */ should be ignored");
+    }
+
+    #[test]
+    fn test_find_non_relational_eq_skips_line_comment() {
+        let s = "x // = \n 1";
+        assert_eq!(find_non_relational_eq(s), None,
+                   "= inside // should be ignored");
+    }
+
+    #[test]
+    fn test_split_top_level_commas_skips_block_comment() {
+        let parts = split_top_level_commas("a /* , */ , b");
+        assert_eq!(parts, vec!["a /* , */ ", " b"],
+                   "comma inside /* */ should not split");
+    }
+
+    #[test]
+    fn test_split_top_level_commas_skips_line_comment() {
+        let parts = split_top_level_commas("a // ,\n, b");
+        assert_eq!(parts, vec!["a // ,\n", " b"],
+                   "comma inside // should not split");
+    }
+
+    #[test]
+    fn test_extract_lt_expr_label_comment_in_body() {
+        let result = extract_lt_expr_label(r#"lt!(val.as_ptr() /* , */, "l")"#);
+        assert_eq!(result, Some(("val.as_ptr() /* , */".to_string(), "l".to_string())),
+                   "comma inside /* */ should not split the body");
     }
 }
