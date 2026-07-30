@@ -17,10 +17,8 @@ lifetime = { git = "https://github.com/fuji-184/R_LT-Rust-User-Space-Lifetime-Li
 
 ### 2. Install CLI tool
 
-Installs only the CLI binary — no test code included:
-
 ```bash
-cargo install --git https://github.com/fuji-184/R_LT-Rust-User-Space-Lifetime-Library
+cargo install --path cargo-lifetime
 ```
 
 Or from a local checkout:
@@ -46,16 +44,14 @@ fn main() {
 
 ### 4. Check for violations
 
-Auto-detect `src/main.rs` or `src/lib.rs`:
-
 ```bash
 cargo lifetime check
 ```
 
-Check a specific file:
+Check with a custom config:
 
 ```bash
-cargo lifetime check --file tests/my_code.rs
+cargo lifetime check --config .lifetime.toml
 ```
 
 ## Usage
@@ -82,6 +78,33 @@ The label (`"my_data"`) pairs each owner with its borrows. Both must use the sam
 ```bash
 cargo lifetime check
 ```
+
+### Supported pattern syntax
+
+`lt!()` works with all Rust pattern forms:
+
+| Pattern | Example |
+|---------|---------|
+| Tuple destructure | `let (a, b) = lt!(get_pair(), "l")` |
+| Array destructure | `let [x, y] = lt!(get_arr(), "l")` |
+| Enum variant | `let Some(val) = lt!(opt, "l")` |
+| Turbofish variant | `let Ok::<_, _>(val) = lt!(res, "l")` |
+| Enum with path | `let MyEnum::Variant(x) = lt!(val, "l")` |
+| Struct destructure | `let MyStruct { field } = lt!(val, "l")` |
+| Nested struct | `let Outer { inner: Inner { x } } = lt!(val, "l")` |
+| Reference binding | `let &x = lt!(&val, "l")` |
+| `let` assignment | `x = lt!(new_val, "l")` |
+
+### Config trailing comments
+
+Config values may have inline `#` comments:
+
+```toml
+safe_fn: my_fn # this comment is stripped
+prefix: Ptr::new(  # also stripped
+```
+
+Empty values are silently ignored.
 
 ### Violations detected
 
@@ -162,7 +185,7 @@ Config supports three keys:
 | `prefix` | Expression prefix to treat as a pointer/borrow |
 | `suffix` | Expression suffix to treat as a pointer/borrow |
 
-Lines starting with `#` are ignored.
+Lines starting with `#` are ignored. Inline `#` comments after values are also stripped.
 
 ### Using the API (library users)
 
@@ -190,15 +213,24 @@ cargo lifetime check <path>                   Check a specific file by path
 cargo lifetime --help                         Show detailed usage
 ```
 
+## Known limitations
+
+- **Code outside `lt!()` is not tracked semantically**: `x = 5` does not invalidate the owner `x`. Only `lt!()` calls and `let` bindings are tracked.
+- **`val.field` / `val.method()` passing**: `my_fn(val.field)` is not detected as usage of owner `val`. Only simple identifiers are checked.
+- **Shadowing**: `let x = lt!(..); let p = lt!(x.as_ptr(), ..); let x = lt!(..);` — borrow `p` references the old `x`, but the analyzer cannot distinguish the two `x` variables.
+- **Multiple labels per owner**: Each owner has exactly one label. `lt!(val, "a")` then `lt!(val.as_ptr(), "b")` — borrow with `"b"` will never match owner with `"a"`.
+- **Raw string literals `r#"..."#`**: The `#` character is not recognized as part of a raw string prefix, so `lt!(` inside `r#"..."#` may be treated as real code.
+
 ## Development
 
 The test runner lives in its own crate so CLI users never pull in test code.
 
 ```bash
-cargo run -p lifetime-test-runner                          Run test suite (54 tests)
-cargo run -p lifetime-cli -- check                         Check project (traverse all modules)
-cargo run -p lifetime-cli -- check --file <path>           Check a single file
-cargo run -p lifetime-cli                                  Show usage info
+cargo test -p lifetime-cli                              Run unit tests (157 tests)
+cargo run -p lifetime-test-runner                        Run integration tests (54 tests)
+cargo run -p lifetime-cli -- check                       Check project (traverse all modules)
+cargo run -p lifetime-cli -- check --file <path>         Check a single file
+cargo run -p lifetime-cli                                Show usage info
 ```
 
 ## Project structure
@@ -208,7 +240,7 @@ Cargo.toml           Workspace root
 lifetime/            Library crate: just the lt! identity macro (zero-cost, no analysis)
   src/lib.rs
 cargo-lifetime/      CLI crate: analysis engine + cargo-lifetime binary
-  src/lib.rs         Library: analysis engine + shared utilities
+  src/lib.rs         Library: analysis engine + shared utilities (157 unit tests)
   src/main.rs        CLI binary: check subcommand only
 test-runner/         Standalone test runner (separate from CLI)
   src/main.rs        Runs all 54 test fixtures
