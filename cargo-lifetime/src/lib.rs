@@ -810,6 +810,7 @@ fn collect_identifiers_from_pattern(s: &str) -> Vec<String> {
     let chars: Vec<char> = s.chars().collect();
     let mut i = 0;
     while i < chars.len() {
+        if chars[i] == '=' || chars[i] == ';' { break; }
         match chars[i] {
             '"' => {
                 i += 1;
@@ -897,7 +898,12 @@ fn parse_destructure(code: &str) -> Option<Vec<String>> {
 
     let first = rest.chars().next()?;
     if first == '(' || first == '[' || first == '{' || rest.starts_with("Some(") || rest.starts_with("Ok(") || rest.starts_with("Err(") {
-        let vars = collect_identifiers_from_pattern(rest);
+        let pattern = if let Some(eq) = rest.find('=') {
+            rest[..eq].trim()
+        } else {
+            rest
+        };
+        let vars = collect_identifiers_from_pattern(pattern);
         if vars.is_empty() { None } else { Some(vars) }
     } else {
         None
@@ -908,20 +914,16 @@ fn parse_destructure_assign(code: &str) -> Option<Vec<String>> {
     let c = code.trim();
     if c.starts_with("let ") { return None; }
     if c.starts_with("for ") { return None; }
+    if c.starts_with("if let ") { return None; }
+    if c.starts_with("while let ") { return None; }
     let eq = find_non_relational_eq(c)?;
     let pattern = c[..eq].trim();
     if pattern.is_empty() { return None; }
     if !pattern.contains('{') && !pattern.contains('(') && !pattern.contains('[') {
         return None;
     }
-    let mut vars = collect_identifiers_from_pattern(pattern);
-    // Strip leading type/variant identifier before { or (
-    if let Some(brace_pos) = pattern.find(|c: char| c == '{' || c == '(' || c == '[') {
-        let before = pattern[..brace_pos].trim();
-        if !before.is_empty() && !vars.is_empty() && vars[0] == before {
-            vars.remove(0);
-        }
-    }
+    let start = pattern.find(|c: char| c == '{' || c == '(' || c == '[')?;
+    let vars = collect_identifiers_from_pattern(&pattern[start..]);
     if vars.is_empty() { None } else { Some(vars) }
 }
 
@@ -966,7 +968,10 @@ fn find_non_relational_eq(s: &str) -> Option<usize> {
                 let prev = bytes[i - 1];
                 if prev == b'!' || prev == b'<' || prev == b'>' || prev == b'=' { i += 1; continue; }
             }
-            if bytes.get(i + 1) == Some(&b'=') { i += 2; continue; }
+            match bytes.get(i + 1) {
+                Some(b'=') | Some(b'>') => { i += 2; continue; }
+                _ => {}
+            }
             return Some(i);
         }
         i += 1;
@@ -1659,5 +1664,64 @@ mod tests {
         let errors = check_source_with_config(src, &Config::default());
         assert!(errors.is_empty(),
                 "borrow inside closure should be ok");
+    }
+
+    #[test]
+    fn test_parse_destructure_removes_rhs() {
+        let vars = parse_destructure("let (a, b) = some_fn()").unwrap();
+        assert_eq!(vars, vec!["a", "b"],
+                   "RHS identifiers should not leak into destructure vars");
+    }
+
+    #[test]
+    fn test_parse_destructure_removes_rhs_array() {
+        let vars = parse_destructure("let [a, b] = get_pair()").unwrap();
+        assert_eq!(vars, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_parse_destructure_assign_variant_with_generics() {
+        let vars = parse_destructure_assign("Ok::<_, _>(val) = expr").unwrap();
+        assert_eq!(vars, vec!["val"],
+                   "::<_,_> generic syntax should not leak Ok into vars");
+    }
+
+    #[test]
+    fn test_parse_destructure_assign_variant_with_turbofish() {
+        let vars = parse_destructure_assign("Err::<String, _>(e) = result").unwrap();
+        assert_eq!(vars, vec!["e"],
+                   "turbofish ::<> should not leak Err/e into vars");
+    }
+
+    #[test]
+    fn test_collect_identifiers_from_pattern_skips_rhs_after_paren() {
+        let vars = collect_identifiers_from_pattern("(a, b) = rhs");
+        assert_eq!(vars, vec!["a", "b"],
+                   "= rhs should not be collected");
+    }
+
+    #[test]
+    fn test_collect_identifiers_from_pattern_skips_rhs_after_bracket() {
+        let vars = collect_identifiers_from_pattern("[a, b] = rhs");
+        assert_eq!(vars, vec!["a", "b"],
+                   "= rhs after bracket should not be collected");
+    }
+
+    #[test]
+    fn test_parse_destructure_assign_skips_if_let() {
+        assert_eq!(parse_destructure_assign("if let Some(x) = val"), None,
+                   "if let should not be treated as destructure assign");
+    }
+
+    #[test]
+    fn test_parse_destructure_assign_skips_while_let() {
+        assert_eq!(parse_destructure_assign("while let Some(x) = val.next()"), None,
+                   "while let should not be treated as destructure assign");
+    }
+
+    #[test]
+    fn test_parse_destructure_assign_skips_match_arm() {
+        assert_eq!(parse_destructure_assign("Some(x) => x"), None,
+                   "match arm => should not be treated as destructure assign");
     }
 }
