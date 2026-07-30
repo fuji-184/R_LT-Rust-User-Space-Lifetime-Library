@@ -59,6 +59,11 @@ impl Config {
             || self.extra_pointer_suffixes.iter().any(|s| e.ends_with(s.as_str()))
     }
 
+    pub fn is_mutable_borrow(&self, e: &str) -> bool {
+        let e = e.trim();
+        is_mutable_borrow(e)
+    }
+
     pub fn load(path: &str) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read config '{}': {}", path, e))?;
@@ -178,6 +183,20 @@ fn builtin_pointer_expr(e: &str) -> bool {
         || e.ends_with(".pin()")
         || e.ends_with(".pin_mut()");
     starts || ends
+}
+
+fn is_mutable_borrow(e: &str) -> bool {
+    e.starts_with("&mut ")
+        || e.starts_with("&raw mut ")
+        || e.ends_with(".as_mut_ptr()")
+        || e.ends_with(".as_mut()")
+        || e.ends_with(".as_bytes_mut()")
+        || e.ends_with(".as_mut_slice()")
+        || e.ends_with(".as_mut_str()")
+        || e.ends_with(".as_deref_mut()")
+        || e.ends_with(".borrow_mut()")
+        || e.ends_with(".borrow_ref_mut()")
+        || e.ends_with(".pin_mut()")
 }
 
 fn find_matching_paren(s: &str, open_pos: usize) -> Option<usize> {
@@ -527,6 +546,7 @@ struct Borrow {
     label: String,
     line: usize,
     depth: usize,
+    mutable: bool,
 }
 
 struct Scanner {
@@ -555,7 +575,9 @@ impl Scanner {
             self.remove_at_depth(&var);
             self.var_depth.insert(var.clone(), self.depth);
             if self.config.is_pointer_expr(&expr) {
-                self.borrows.push(Borrow { var, label, line, depth: self.depth });
+                let mutable = self.config.is_mutable_borrow(&expr);
+                self.check_aliasing(&label, mutable, &var, line);
+                self.borrows.push(Borrow { var, label, line, depth: self.depth, mutable });
             } else {
                 self.owners.push(Owner { var, label, line, depth: self.depth });
             }
@@ -590,12 +612,14 @@ impl Scanner {
             return;
         }
 
-        if let Some((var, _expr, label)) = parse_lt_assign(code) {
+        if let Some((var, expr, label)) = parse_lt_assign(code) {
             let decl_d = self.var_depth.get(&var).copied().unwrap_or(self.depth);
             let eff_d = decl_d.min(self.depth);
             self.owners.retain(|o| o.var != var);
             self.borrows.retain(|b| b.var != var);
-            self.borrows.push(Borrow { var, label, line, depth: eff_d });
+            let mutable = self.config.is_mutable_borrow(&expr);
+            self.check_aliasing(&label, mutable, &var, line);
+            self.borrows.push(Borrow { var, label, line, depth: eff_d, mutable });
             return;
         }
 
@@ -610,6 +634,25 @@ impl Scanner {
     fn remove_at_depth(&mut self, var: &str) {
         self.owners.retain(|o| !(o.var == var && o.depth == self.depth));
         self.borrows.retain(|b| !(b.var == var && b.depth == self.depth));
+    }
+
+    fn check_aliasing(&mut self, label: &str, mutable: bool, var: &str, line: usize) {
+        for b in &self.borrows {
+            if b.label != label { continue; }
+            if !mutable && !b.mutable { continue; }
+            let kind = if mutable && b.mutable {
+                "two mutable borrows conflict"
+            } else {
+                "mutable and immutable borrow conflict"
+            };
+            self.errors.push((
+                line,
+                format!(
+                    "[{label}] aliasing violation: {kind} — `{var}` (declared at line {}) conflicts with `{}` (declared at line {})",
+                    line, b.var, b.line
+                ),
+            ));
+        }
     }
 
     fn exit_scope(&mut self, line: usize) {

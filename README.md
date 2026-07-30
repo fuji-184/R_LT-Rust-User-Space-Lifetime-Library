@@ -116,6 +116,25 @@ Empty values are silently ignored.
 | **scope escape** | borrow outlives the scope where owner was created |
 | **reverse order** | borrow declared before owner in same scope |
 | **function move** | owner passed to function while borrow active |
+| **aliasing** | two mutable borrows, or mutable + immutable borrow, active simultaneously with same label |
+
+### Aliasing detection
+
+The tool enforces Rust's aliasing rule per label: for any given label, you may have any number of immutable borrows, **or** one mutable borrow, but not both. This catches misuse of `&mut` and `.as_mut_*()` alongside immutable borrows with the same label.
+
+```rust
+// Violation: mutable + immutable borrow with same label
+let val = lt!(vec![1, 2, 3], "l");
+let p = lt!(&mut val, "l");
+let q = lt!(val.as_ptr(), "l");   // error: aliasing violation
+```
+
+```rust
+// Allowed: multiple immutable borrows with same label
+let val = lt!(vec![1, 2, 3], "l");
+let p = lt!(val.as_ptr(), "l");
+let q = lt!(val.as_ref(), "l");   // OK
+```
 
 ## Syntax reference
 
@@ -222,6 +241,7 @@ cargo lifetime --help                         Show detailed usage
 - **Shadowing**: `let x = lt!(..); let p = lt!(x.as_ptr(), ..); let x = lt!(..);` — borrow `p` references the old `x`, but the analyzer cannot distinguish the two `x` variables.
 - **Multiple labels per owner**: Each owner has exactly one label. `lt!(val, "a")` then `lt!(val.as_ptr(), "b")` — borrow with `"b"` will never match owner with `"a"`.
 - **Raw string literals `r#"..."#`**: The `#` character is not recognized as part of a raw string prefix, so `lt!(` inside `r#"..."#` may be treated as real code.
+- **Custom pointer prefixes/suffixes default to immutable**: Prefixes and suffixes added via config are treated as immutable borrows by the aliasing checker. Use `&mut` or `.as_mut_*()` patterns for mutable borrows.
 
 ## Development
 
@@ -229,7 +249,7 @@ The test runner lives in its own crate so CLI users never pull in test code.
 
 ```bash
 cargo test -p lifetime-cli                              Run unit tests (157 tests)
-cargo run -p lifetime-test-runner                        Run integration tests (54 tests)
+cargo run -p lifetime-test-runner                        Run integration tests (57 tests)
 cargo run -p lifetime-cli -- check                       Check project (traverse all modules)
 cargo run -p lifetime-cli -- check --file <path>         Check a single file
 cargo run -p lifetime-cli                                Show usage info
@@ -245,6 +265,6 @@ cargo-lifetime/      CLI crate: analysis engine + cargo-lifetime binary
   src/lib.rs         Library: analysis engine + shared utilities (157 unit tests)
   src/main.rs        CLI binary: check subcommand only
 test-runner/         Standalone test runner (separate from CLI)
-  src/main.rs        Runs all 54 test fixtures
+  src/main.rs        Runs all 57 test fixtures
 tests/               Test fixtures (valid_*.rs → zero violations, invalid_*.rs → violations expected)
 ```
