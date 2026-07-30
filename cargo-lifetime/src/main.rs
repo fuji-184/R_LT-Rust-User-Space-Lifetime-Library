@@ -1,12 +1,12 @@
 use lifetime_cli::*;
 use std::collections::HashSet;
 
-fn check_file(path: &str) -> Result<Vec<(usize, String)>, String> {
+fn check_file(path: &str, config: &Config) -> Result<Vec<(usize, String)>, String> {
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => return Err(format!("error reading `{}`: {}", path, e)),
     };
-    Ok(check_source(&src))
+    Ok(check_source_with_config(&src, config))
 }
 
 fn find_module_files(src: &str, base_dir: &str) -> Vec<String> {
@@ -85,7 +85,7 @@ fn find_inline_modules(src: &str) -> Vec<(String, String)> {
     modules
 }
 
-fn check_project() -> Vec<(String, usize, String)> {
+fn check_project(config: &Config) -> Vec<(String, usize, String)> {
     let entry = if std::path::Path::new("src/main.rs").exists() {
         "src/main.rs".to_string()
     } else if std::path::Path::new("src/lib.rs").exists() {
@@ -118,12 +118,12 @@ fn check_project() -> Vec<(String, usize, String)> {
         for (name, body) in find_inline_modules(&src) {
             let inline_path = format!("{} (inline mod {})", path, name);
             if seen.insert(inline_path.clone()) {
-                for (line, msg) in check_source(&body) {
+                for (line, msg) in check_source_with_config(&body, config) {
                     all.push((format!("{}:{}", path, name), line, msg));
                 }
             }
         }
-        for (line, msg) in check_source(&src) {
+        for (line, msg) in check_source_with_config(&src, config) {
             all.push((path.clone(), line, msg));
         }
     }
@@ -132,10 +132,31 @@ fn check_project() -> Vec<(String, usize, String)> {
 
 fn print_usage() {
     eprintln!("Usage:");
-    eprintln!("  cargo lifetime check                Auto-detect & traverse modules");
-    eprintln!("  cargo lifetime check --file <path>  Check a single file");
-    eprintln!("  cargo lifetime check <path>         Check a specific file");
-    eprintln!("  cargo lifetime --help               Show this help");
+    eprintln!("  cargo lifetime check                     Auto-detect & traverse modules");
+    eprintln!("  cargo lifetime check --file <path>       Check a single file");
+    eprintln!("  cargo lifetime check --config <path>     Use config file (e.g. .lifetime.toml)");
+    eprintln!("  cargo lifetime check <path>              Check a specific file");
+    eprintln!("  cargo lifetime --help                    Show this help");
+}
+
+fn load_config(args: &[String]) -> Config {
+    let mut config = Config::new();
+    let mut i = 2;
+    while i < args.len() {
+        if args[i] == "--config" {
+            if let Some(path) = args.get(i + 1) {
+                match Config::load(path) {
+                    Ok(c) => { config = c; i += 2; continue; }
+                    Err(e) => { eprintln!("error: {}", e); std::process::exit(1); }
+                }
+            } else {
+                eprintln!("error: --config requires a path argument");
+                std::process::exit(1);
+            }
+        }
+        i += 1;
+    }
+    config
 }
 
 fn main() {
@@ -147,9 +168,10 @@ fn main() {
             return;
         }
         Some("check") => {
+            let config = load_config(&args);
             match args.get(2).map(|s| s.as_str()) {
                 Some("--help") | Some("-h") => {
-                    eprintln!("Usage: cargo lifetime check [--file <path> | <path>]");
+                    eprintln!("Usage: cargo lifetime check [--file <path> | --config <path> | <path>]");
                     return;
                 }
                 Some("--file") => {
@@ -161,7 +183,7 @@ fn main() {
                             std::process::exit(1);
                         }
                     };
-                    match check_file(path) {
+                    match check_file(path, &config) {
                         Ok(errors) => {
                             print_file_errors(path, &errors);
                             if !errors.is_empty() {
@@ -175,7 +197,7 @@ fn main() {
                     }
                 }
                 Some(p) if !p.starts_with('-') => {
-                    match check_file(p) {
+                    match check_file(p, &config) {
                         Ok(errors) => {
                             print_file_errors(p, &errors);
                             if !errors.is_empty() {
@@ -189,7 +211,7 @@ fn main() {
                     }
                 }
                 _ => {
-                    let errors = check_project();
+                    let errors = check_project(&config);
                     if errors.is_empty() {
                         return;
                     }

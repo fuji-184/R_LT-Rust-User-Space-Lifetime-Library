@@ -15,7 +15,7 @@ const KEYWORDS: &[&str] = &[
     "mod", "use", "extern", "true", "false",
 ];
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Config {
     extra_safe_fns: Vec<String>,
     extra_pointer_prefixes: Vec<String>,
@@ -924,4 +924,135 @@ pub fn is_ident(s: &str) -> bool {
     let first = chars.next().unwrap();
     if !first.is_ascii_alphabetic() && first != '_' { return false; }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn test_config_default() {
+        let c = Config::default();
+        assert!(!c.is_safe_fn("my_fn"));
+        assert!(!c.is_pointer_expr("MyPtr::new(x)"));
+    }
+
+    #[test]
+    fn test_config_add_safe_fn() {
+        let c = Config::new().add_safe_fn("my_fn");
+        assert!(c.is_safe_fn("my_fn"));
+        assert!(!c.is_safe_fn("other_fn"));
+    }
+
+    #[test]
+    fn test_config_add_pointer_prefix() {
+        let c = Config::new().add_pointer_prefix("MyPtr::new(");
+        assert!(c.is_pointer_expr("MyPtr::new(x)"));
+        assert!(!c.is_pointer_expr("Other::new(x)"));
+    }
+
+    #[test]
+    fn test_config_add_pointer_suffix() {
+        let c = Config::new().add_pointer_suffix(".raw()");
+        assert!(c.is_pointer_expr("x.raw()"));
+        assert!(!c.is_pointer_expr("x.other()"));
+    }
+
+    #[test]
+    fn test_config_load_valid() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("_test_lifetime_config_valid.toml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(f, "safe_fn: custom_fn\nprefix: Ptr::new(\nsuffix: .leak()\n").unwrap();
+        let c = Config::load(path.to_str().unwrap()).unwrap();
+        assert!(c.is_safe_fn("custom_fn"));
+        assert!(c.is_pointer_expr("Ptr::new(x)"));
+        assert!(c.is_pointer_expr("x.leak()"));
+        assert!(!c.is_safe_fn("other_fn"));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn test_config_load_unknown_key() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("_test_lifetime_config_bad_key.toml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(f, "unknown: value\n").unwrap();
+        let result = Config::load(path.to_str().unwrap());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unknown key"));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn test_config_load_missing_colon() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("_test_lifetime_config_no_colon.toml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(f, "bad line\n").unwrap();
+        let result = Config::load(path.to_str().unwrap());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("expected 'key: value'"));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn test_config_load_comments_and_blanks() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("_test_lifetime_config_comments.toml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(f, "# comment\n\nsafe_fn: fn1\n# another\nsafe_fn: fn2\n").unwrap();
+        let c = Config::load(path.to_str().unwrap()).unwrap();
+        assert!(c.is_safe_fn("fn1"));
+        assert!(c.is_safe_fn("fn2"));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn test_builtin_safe_fn() {
+        assert!(builtin_safe_fn("println"));
+        assert!(builtin_safe_fn("drop"));
+        assert!(builtin_safe_fn("clone"));
+    }
+
+    #[test]
+    fn test_builtin_pointer_expr() {
+        assert!(builtin_pointer_expr("&val"));
+        assert!(builtin_pointer_expr("val.as_ptr()"));
+        assert!(builtin_pointer_expr("Box::into_raw(box)"));
+    }
+
+    #[test]
+    fn test_custom_safe_fn_suppresses_error() {
+        let src = "let val = lt!(vec![1, 2, 3], \"l\");\nlet p = lt!(val.as_ptr(), \"l\");\nmy_fn(val);\n";
+        let default_config = Config::default();
+        let custom_config = Config::new().add_safe_fn("my_fn");
+        let default_errors = check_source_with_config(src, &default_config);
+        let custom_errors = check_source_with_config(src, &custom_config);
+        assert!(!default_errors.is_empty(), "my_fn should be flagged with default config");
+        assert!(custom_errors.is_empty(), "my_fn suppressed by custom safe_fn");
+    }
+
+    #[test]
+    fn test_custom_prefix_triggers_borrow_tracking() {
+        let src = "let val = lt!(vec![1, 2, 3], \"l\");\nlet p = lt!(MyPtr::new(&val), \"l\");\ndrop(val);\n";
+        let default_config = Config::default();
+        let custom_config = Config::new().add_pointer_prefix("MyPtr::new(");
+        let default_errors = check_source_with_config(src, &default_config);
+        let custom_errors = check_source_with_config(src, &custom_config);
+        assert!(default_errors.is_empty(), "MyPtr not recognized with default config");
+        assert!(!custom_errors.is_empty(), "MyPtr recognized as borrow with custom prefix");
+    }
+
+    #[test]
+    fn test_custom_suffix_triggers_borrow_tracking() {
+        let src = "let val = lt!(vec![1, 2, 3], \"l\");\nlet p = lt!(val.custom_ref(), \"l\");\ndrop(val);\n";
+        let default_config = Config::default();
+        let custom_config = Config::new().add_pointer_suffix(".custom_ref()");
+        let default_errors = check_source_with_config(src, &default_config);
+        let custom_errors = check_source_with_config(src, &custom_config);
+        assert!(default_errors.is_empty(), "custom_ref not recognized with default config");
+        assert!(!custom_errors.is_empty(), "custom_ref recognized as borrow with custom suffix");
+    }
 }

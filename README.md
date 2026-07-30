@@ -119,22 +119,75 @@ lt!(expr, "label")
 3. **Violation detection**: Checks for drops, scope exits, and function calls that would invalidate active borrows.
 4. **Error reporting**: Reports violations as `file.rs:line: [label] description` with declaration locations.
 
-The `lt!` macro itself is a zero-cost identity:
+The `lt!` macro itself is a zero-cost identity — the single-argument form produces a compile error as a reminder, the two-argument form compiles away to nothing:
 
 ```rust
 macro_rules! lt {
     ($e:expr, $l:expr) => { $e };
+    ($e:expr) => {
+        compile_error!("missing lifetime label in lt!() — use lt!(expr, \"label\")");
+    };
 }
 ```
 
-It compiles away to nothing — all checking happens at analysis time.
+All checking happens at analysis time, zero runtime cost.
+
+## Custom configuration
+
+Extend the built-in safe function and pointer expression lists using either a config file or the `Config` API.
+
+### Config file (`.lifetime.toml`)
+
+Create `.lifetime.toml` in your project root:
+
+```toml
+# Mark functions as safe (borrow check skipped for their arguments)
+safe_fn: my_custom_safe_fn
+safe_fn: another_safe_fn
+
+# Mark expressions by prefix as pointer borrows (e.g. custom pointer wrappers)
+prefix: MyPtr::new(
+prefix: CustomHandle::from_raw(
+
+# Mark expressions by suffix as pointer borrows
+suffix: .get_ref()
+suffix: .raw_handle()
+```
+
+Config supports three keys:
+
+| key | description |
+|-----|-------------|
+| `safe_fn` | Function name to skip borrow check on its arguments |
+| `prefix` | Expression prefix to treat as a pointer/borrow |
+| `suffix` | Expression suffix to treat as a pointer/borrow |
+
+Lines starting with `#` are ignored.
+
+### Using the API (library users)
+
+```rust
+use lifetime_cli::{Config, check_source_with_config};
+
+let config = Config::new()
+    .add_safe_fn("my_safe_fn")
+    .add_pointer_prefix("CustomPtr::new(")
+    .add_pointer_suffix(".as_raw()");
+
+let errors = check_source_with_config(src, &config);
+```
+
+The default config is used when calling `check_source(&src)`.
 
 ## CLI
 
 ```bash
-cargo lifetime                      Show usage info
-cargo lifetime check                Auto-detect & traverse modules from src/main.rs or src/lib.rs
-cargo lifetime check --file <path>  Check a specific file only (no module traversal)
+cargo lifetime                                Show usage info
+cargo lifetime check                          Auto-detect & traverse modules from src/main.rs or src/lib.rs
+cargo lifetime check --file <path>            Check a specific file only (no module traversal)
+cargo lifetime check --config <path>          Use custom config file (e.g. .lifetime.toml)
+cargo lifetime check <path>                   Check a specific file by path
+cargo lifetime --help                         Show detailed usage
 ```
 
 ## Development
