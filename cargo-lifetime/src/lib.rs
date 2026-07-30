@@ -15,6 +15,168 @@ const KEYWORDS: &[&str] = &[
     "mod", "use", "extern", "true", "false",
 ];
 
+#[derive(Clone)]
+pub struct Config {
+    extra_safe_fns: Vec<String>,
+    extra_pointer_prefixes: Vec<String>,
+    extra_pointer_suffixes: Vec<String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self { extra_safe_fns: Vec::new(), extra_pointer_prefixes: Vec::new(), extra_pointer_suffixes: Vec::new() }
+    }
+}
+
+impl Config {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add_safe_fn(mut self, name: &str) -> Self {
+        self.extra_safe_fns.push(name.to_string());
+        self
+    }
+
+    pub fn add_pointer_prefix(mut self, prefix: &str) -> Self {
+        self.extra_pointer_prefixes.push(prefix.to_string());
+        self
+    }
+
+    pub fn add_pointer_suffix(mut self, suffix: &str) -> Self {
+        self.extra_pointer_suffixes.push(suffix.to_string());
+        self
+    }
+
+    pub fn is_safe_fn(&self, name: &str) -> bool {
+        builtin_safe_fn(name) || self.extra_safe_fns.iter().any(|f| f == name)
+    }
+
+    pub fn is_pointer_expr(&self, e: &str) -> bool {
+        let e = e.trim();
+        builtin_pointer_expr(e)
+            || self.extra_pointer_prefixes.iter().any(|p| e.starts_with(p.as_str()))
+            || self.extra_pointer_suffixes.iter().any(|s| e.ends_with(s.as_str()))
+    }
+
+    pub fn load(path: &str) -> Result<Self, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read config '{}': {}", path, e))?;
+        let mut config = Self::new();
+        for (i, line) in content.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let colon = line.find(':').ok_or_else(|| {
+                format!("{}:{}: expected 'key: value'", path, i + 1)
+            })?;
+            let key = line[..colon].trim();
+            let value = line[colon + 1..].trim();
+            match key {
+                "safe_fn" => config.extra_safe_fns.push(value.to_string()),
+                "prefix" => config.extra_pointer_prefixes.push(value.to_string()),
+                "suffix" => config.extra_pointer_suffixes.push(value.to_string()),
+                _ => return Err(format!("{}:{}: unknown key '{}'", path, i + 1, key)),
+            }
+        }
+        Ok(config)
+    }
+}
+
+fn builtin_safe_fn(name: &str) -> bool {
+    matches!(
+        name,
+        "print" | "println" | "eprint" | "eprintln"
+            | "write" | "writeln"
+            | "format" | "format_args"
+            | "assert" | "assert_eq" | "assert_ne"
+            | "debug_assert" | "debug_assert_eq" | "debug_assert_ne"
+            | "panic" | "unreachable" | "unimplemented" | "todo"
+            | "dbg" | "stringify" | "concat" | "include_str" | "include_bytes"
+            | "Vec::new" | "vec" | "vec!"
+            | "Box::new" | "Box::pin"
+            | "Rc::new" | "Rc::pin"
+            | "Arc::new" | "Arc::pin"
+            | "String::new" | "String::from" | "String::with_capacity"
+            | "format!"
+            | "Some" | "Ok" | "Err" | "None"
+            | "std::mem::drop" | "mem::drop" | "drop"
+            | "std::mem::forget" | "mem::forget" | "forget"
+            | "std::mem::replace" | "mem::replace"
+            | "std::mem::take" | "mem::take"
+            | "std::mem::swap" | "mem::swap"
+            | "core::mem::drop" | "core::mem::forget"
+            | "std::ptr::read" | "ptr::read"
+            | "std::ptr::write" | "ptr::write"
+            | "std::ptr::replace" | "ptr::replace"
+            | "std::ptr::drop_in_place" | "ptr::drop_in_place"
+            | "std::sync::Arc::clone" | "Arc::clone"
+            | "std::rc::Rc::clone" | "Rc::clone"
+            | "clone"
+            | "as_ref" | "as_mut"
+            | "into" | "from"
+            | "as_ptr" | "as_mut_ptr"
+            | "len" | "is_empty" | "capacity"
+            | "unwrap" | "expect" | "ok" | "err"
+            | "map" | "and_then" | "or_else"
+            | "iter" | "into_iter" | "iter_mut"
+    )
+}
+
+fn builtin_pointer_expr(e: &str) -> bool {
+    let starts = e.starts_with('&')
+        || e.starts_with("&raw ")
+        || e.starts_with("&raw mut ")
+        || e.starts_with("Box::into_raw(")
+        || e.starts_with("std::boxed::Box::into_raw(")
+        || e.starts_with("Rc::as_ptr(")
+        || e.starts_with("std::rc::Rc::as_ptr(")
+        || e.starts_with("Arc::as_ptr(")
+        || e.starts_with("std::sync::Arc::as_ptr(")
+        || e.starts_with("NonNull::new(")
+        || e.starts_with("std::ptr::NonNull::new(")
+        || e.starts_with("NonNull::new_unchecked(")
+        || e.starts_with("std::ptr::NonNull::new_unchecked(")
+        || e.starts_with("Pin::new(")
+        || e.starts_with("std::pin::Pin::new(")
+        || e.starts_with("Pin::new_unchecked(")
+        || e.starts_with("std::pin::Pin::new_unchecked(")
+        || e.starts_with("ManuallyDrop::new(")
+        || e.starts_with("std::mem::ManuallyDrop::new(")
+        || e.starts_with("Cell::new(")
+        || e.starts_with("std::cell::Cell::new(")
+        || e.starts_with("RefCell::new(")
+        || e.starts_with("std::cell::RefCell::new(")
+        || e.starts_with("Mutex::new(")
+        || e.starts_with("std::sync::Mutex::new(")
+        || e.starts_with("RwLock::new(")
+        || e.starts_with("std::sync::RwLock::new(")
+        || e.starts_with("UnsafeCell::new(")
+        || e.starts_with("std::cell::UnsafeCell::new(")
+        || e.starts_with("Cow::Borrowed(")
+        || e.starts_with("std::borrow::Cow::Borrowed(");
+    let ends = e.ends_with(".as_ptr()")
+        || e.ends_with(".as_mut_ptr()")
+        || e.ends_with(".as_ref()")
+        || e.ends_with(".as_mut()")
+        || e.ends_with(".as_bytes()")
+        || e.ends_with(".as_bytes_mut()")
+        || e.ends_with(".as_slice()")
+        || e.ends_with(".as_mut_slice()")
+        || e.ends_with(".as_str()")
+        || e.ends_with(".as_mut_str()")
+        || e.ends_with(".as_deref()")
+        || e.ends_with(".as_deref_mut()")
+        || e.ends_with(".borrow()")
+        || e.ends_with(".borrow_mut()")
+        || e.ends_with(".borrow_ref()")
+        || e.ends_with(".borrow_ref_mut()")
+        || e.ends_with(".pin()")
+        || e.ends_with(".pin_mut()");
+    starts || ends
+}
+
 fn find_matching_paren(s: &str, open_pos: usize) -> Option<usize> {
     if !s.is_char_boundary(open_pos) { return None; }
     if s[open_pos..].chars().next()? != '(' { return None; }
@@ -98,7 +260,11 @@ fn smart_split(s: &str) -> Vec<String> {
 }
 
 pub fn check_source(src: &str) -> Vec<(usize, String)> {
-    let mut sc = Scanner::new();
+    check_source_with_config(src, &Config::default())
+}
+
+pub fn check_source_with_config(src: &str, config: &Config) -> Vec<(usize, String)> {
+    let mut sc = Scanner::new(config.clone());
     let lines = join_lt_lines(src);
     for &(line_num, ref raw) in &lines {
         let s = raw.trim();
@@ -322,6 +488,7 @@ struct Borrow {
 }
 
 struct Scanner {
+    config: Config,
     depth: usize,
     var_depth: HashMap<String, usize>,
     owners: Vec<Owner>,
@@ -330,8 +497,9 @@ struct Scanner {
 }
 
 impl Scanner {
-    fn new() -> Self {
+    fn new(config: Config) -> Self {
         Scanner {
+            config,
             depth: 0,
             var_depth: HashMap::new(),
             owners: Vec::new(),
@@ -344,7 +512,7 @@ impl Scanner {
         if let Some((var, expr, label)) = parse_lt_let(code) {
             self.remove_at_depth(&var);
             self.var_depth.insert(var.clone(), self.depth);
-            if is_pointer_expr(&expr) {
+            if self.config.is_pointer_expr(&expr) {
                 self.borrows.push(Borrow { var, label, line, depth: self.depth });
             } else {
                 self.owners.push(Owner { var, label, line, depth: self.depth });
@@ -432,7 +600,7 @@ impl Scanner {
         };
         let fn_name = c[..lparen].trim();
         if fn_name.is_empty() || fn_name.contains(' ') || fn_name.contains('=') { return; }
-        if is_safe_fn(fn_name) { return; }
+        if self.config.is_safe_fn(fn_name) { return; }
         if KEYWORDS.contains(&fn_name) { return; }
 
         let args = match extract_paren_body(&c[lparen..]) {
@@ -748,100 +916,6 @@ fn parse_drop(code: &str) -> Option<String> {
     let var = rest[..paren].trim();
     if var.is_empty() { return None; }
     Some(var.to_string())
-}
-
-fn is_safe_fn(name: &str) -> bool {
-    matches!(
-        name,
-        "print" | "println" | "eprint" | "eprintln"
-            | "write" | "writeln"
-            | "format" | "format_args"
-            | "assert" | "assert_eq" | "assert_ne"
-            | "debug_assert" | "debug_assert_eq" | "debug_assert_ne"
-            | "panic" | "unreachable" | "unimplemented" | "todo"
-            | "dbg" | "stringify" | "concat" | "include_str" | "include_bytes"
-            | "Vec::new" | "vec" | "vec!"
-            | "Box::new" | "Box::pin"
-            | "Rc::new" | "Rc::pin"
-            | "Arc::new" | "Arc::pin"
-            | "String::new" | "String::from" | "String::with_capacity"
-            | "format!"
-            | "Some" | "Ok" | "Err" | "None"
-            | "std::mem::drop" | "mem::drop" | "drop"
-            | "std::mem::forget" | "mem::forget" | "forget"
-            | "std::mem::replace" | "mem::replace"
-            | "std::mem::take" | "mem::take"
-            | "std::mem::swap" | "mem::swap"
-            | "core::mem::drop" | "core::mem::forget"
-            | "std::ptr::read" | "ptr::read"
-            | "std::ptr::write" | "ptr::write"
-            | "std::ptr::replace" | "ptr::replace"
-            | "std::ptr::drop_in_place" | "ptr::drop_in_place"
-            | "std::sync::Arc::clone" | "Arc::clone"
-            | "std::rc::Rc::clone" | "Rc::clone"
-            | "clone"
-            | "as_ref" | "as_mut"
-            | "into" | "from"
-            | "as_ptr" | "as_mut_ptr"
-            | "len" | "is_empty" | "capacity"
-            | "unwrap" | "expect" | "ok" | "err"
-            | "map" | "and_then" | "or_else"
-            | "iter" | "into_iter" | "iter_mut"
-    )
-}
-
-fn is_pointer_expr(e: &str) -> bool {
-    let e = e.trim();
-    let starts = e.starts_with('&')
-        || e.starts_with("&raw ")
-        || e.starts_with("&raw mut ")
-        || e.starts_with("Box::into_raw(")
-        || e.starts_with("std::boxed::Box::into_raw(")
-        || e.starts_with("Rc::as_ptr(")
-        || e.starts_with("std::rc::Rc::as_ptr(")
-        || e.starts_with("Arc::as_ptr(")
-        || e.starts_with("std::sync::Arc::as_ptr(")
-        || e.starts_with("NonNull::new(")
-        || e.starts_with("std::ptr::NonNull::new(")
-        || e.starts_with("NonNull::new_unchecked(")
-        || e.starts_with("std::ptr::NonNull::new_unchecked(")
-        || e.starts_with("Pin::new(")
-        || e.starts_with("std::pin::Pin::new(")
-        || e.starts_with("Pin::new_unchecked(")
-        || e.starts_with("std::pin::Pin::new_unchecked(")
-        || e.starts_with("ManuallyDrop::new(")
-        || e.starts_with("std::mem::ManuallyDrop::new(")
-        || e.starts_with("Cell::new(")
-        || e.starts_with("std::cell::Cell::new(")
-        || e.starts_with("RefCell::new(")
-        || e.starts_with("std::cell::RefCell::new(")
-        || e.starts_with("Mutex::new(")
-        || e.starts_with("std::sync::Mutex::new(")
-        || e.starts_with("RwLock::new(")
-        || e.starts_with("std::sync::RwLock::new(")
-        || e.starts_with("UnsafeCell::new(")
-        || e.starts_with("std::cell::UnsafeCell::new(")
-        || e.starts_with("Cow::Borrowed(")
-        || e.starts_with("std::borrow::Cow::Borrowed(");
-    let ends = e.ends_with(".as_ptr()")
-        || e.ends_with(".as_mut_ptr()")
-        || e.ends_with(".as_ref()")
-        || e.ends_with(".as_mut()")
-        || e.ends_with(".as_bytes()")
-        || e.ends_with(".as_bytes_mut()")
-        || e.ends_with(".as_slice()")
-        || e.ends_with(".as_mut_slice()")
-        || e.ends_with(".as_str()")
-        || e.ends_with(".as_mut_str()")
-        || e.ends_with(".as_deref()")
-        || e.ends_with(".as_deref_mut()")
-        || e.ends_with(".borrow()")
-        || e.ends_with(".borrow_mut()")
-        || e.ends_with(".borrow_ref()")
-        || e.ends_with(".borrow_ref_mut()")
-        || e.ends_with(".pin()")
-        || e.ends_with(".pin_mut()");
-    starts || ends
 }
 
 pub fn is_ident(s: &str) -> bool {
