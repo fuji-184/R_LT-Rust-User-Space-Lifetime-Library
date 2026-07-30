@@ -74,11 +74,13 @@ impl Config {
             let key = line[..colon].trim();
             let value = line[colon + 1..].trim();
             let value = value.splitn(2, '#').next().unwrap_or("").trim();
-            match key {
-                "safe_fn" => config.extra_safe_fns.push(value.to_string()),
-                "prefix" => config.extra_pointer_prefixes.push(value.to_string()),
-                "suffix" => config.extra_pointer_suffixes.push(value.to_string()),
-                _ => return Err(format!("{}:{}: unknown key '{}'", path, i + 1, key)),
+            if !value.is_empty() {
+                match key {
+                    "safe_fn" => config.extra_safe_fns.push(value.to_string()),
+                    "prefix" => config.extra_pointer_prefixes.push(value.to_string()),
+                    "suffix" => config.extra_pointer_suffixes.push(value.to_string()),
+                    _ => return Err(format!("{}:{}: unknown key '{}'", path, i + 1, key)),
+                }
             }
         }
         Ok(config)
@@ -829,8 +831,22 @@ fn collect_identifiers_from_pattern(s: &str) -> Vec<String> {
                 }
                 if i < chars.len() { i += 1; }
             }
-            '(' | '[' => {
-                let close = if chars[i] == '(' { ')' } else { ']' };
+            ':' => {
+                if i + 2 < chars.len() && chars[i + 1] == ':' && chars[i + 2] == '<' {
+                    let mut depth = 1;
+                    let mut k = i + 3;
+                    while k < chars.len() && depth > 0 {
+                        if chars[k] == '<' { depth += 1; }
+                        else if chars[k] == '>' { depth -= 1; }
+                        k += 1;
+                    }
+                    i = k;
+                } else {
+                    i += 1;
+                }
+            }
+            '(' | '[' | '{' => {
+                let close = match chars[i] { '(' => ')', '[' => ']', _ => '}' };
                 let mut depth: isize = 1;
                 let mut j = i + 1;
                 while j < chars.len() && depth > 0 {
@@ -841,47 +857,52 @@ fn collect_identifiers_from_pattern(s: &str) -> Vec<String> {
                 let mut peek = i;
                 while peek > 0 && chars[peek - 1].is_whitespace() { peek -= 1; }
                 if peek > 0 {
-                    let mut start = peek - 1;
-                    while start > 0 && (chars[start - 1].is_ascii_alphanumeric() || chars[start - 1] == '_') { start -= 1; }
-                    let name: String = chars[start..peek].iter().collect();
-                    if vars.last().map_or(false, |v| v == &name) { vars.pop(); }
-                }
-                let inner: String = chars[i + 1..j - 1].iter().collect();
-                for part in split_top_level_commas(&inner) {
-                    vars.extend(collect_identifiers_from_pattern(part.trim()));
-                }
-                i = j;
-            }
-            '{' => {
-                let mut depth: isize = 1;
-                let mut j = i + 1;
-                while j < chars.len() && depth > 0 {
-                    if chars[j] == '{' { depth += 1; }
-                    else if chars[j] == '}' { depth -= 1; }
-                    j += 1;
-                }
-                let mut peek = i;
-                while peek > 0 && chars[peek - 1].is_whitespace() { peek -= 1; }
-                if peek > 0 {
-                    let mut start = peek - 1;
-                    while start > 0 && (chars[start - 1].is_ascii_alphanumeric() || chars[start - 1] == '_') { start -= 1; }
-                    let name: String = chars[start..peek].iter().collect();
-                    if vars.last().map_or(false, |v| v == &name) { vars.pop(); }
-                }
-                let inner: String = chars[i + 1..j - 1].iter().collect();
-                for field in split_top_level_commas(&inner) {
-                    let field = field.trim();
-                    if let Some(eq_pos) = field.find(':') {
-                        let val = field[eq_pos + 1..].trim();
-                if val.starts_with('{') {
-                        vars.extend(collect_identifiers_from_pattern(val));
-                    } else if let Some(inner_start) = val.find('{') {
-                        vars.extend(collect_identifiers_from_pattern(&val[inner_start..]));
-                    } else if is_ident(val) {
-                        vars.push(val.to_string());
+                    let mut before = peek;
+                    if before >= 2 && chars[before - 1] == '>' {
+                        let mut angle = before - 1;
+                        let mut ad = 1;
+                        while angle > 0 && ad > 0 {
+                            angle -= 1;
+                            if chars[angle] == '>' { ad += 1; }
+                            else if chars[angle] == '<' { ad -= 1; }
+                        }
+                        if angle >= 2 && chars[angle - 1] == ':' && chars[angle - 2] == ':' {
+                            before = angle - 2;
+                        } else {
+                            before = peek;
+                        }
+                        while before > 0 && chars[before - 1].is_whitespace() { before -= 1; }
                     }
-                    } else if !field.is_empty() && is_ident(field) {
-                        vars.push(field.to_string());
+                    if before > 0 {
+                        let mut start = before - 1;
+                        while start > 0 && (chars[start - 1].is_ascii_alphanumeric() || chars[start - 1] == '_') { start -= 1; }
+                        let name: String = chars[start..before].iter().collect();
+                        if !name.is_empty() && vars.last().map_or(false, |v| v == &name) { vars.pop(); }
+                    }
+                }
+                if chars[i] == '{' {
+                    let inner: String = chars[i + 1..j - 1].iter().collect();
+                    for field in split_top_level_commas(&inner) {
+                        let field = field.trim();
+                        if let Some(eq_pos) = field.find(':') {
+                            let mut val = field[eq_pos + 1..].trim();
+                            if val.starts_with("ref ") { val = val[4..].trim(); }
+                            else if val.starts_with("mut ") { val = val[4..].trim(); }
+                            if val.starts_with('{') {
+                                vars.extend(collect_identifiers_from_pattern(val));
+                            } else if let Some(inner_start) = val.find('{') {
+                                vars.extend(collect_identifiers_from_pattern(&val[inner_start..]));
+                            } else if is_ident(val) {
+                                vars.push(val.to_string());
+                            }
+                        } else if !field.is_empty() && is_ident(field) {
+                            vars.push(field.to_string());
+                        }
+                    }
+                } else {
+                    let inner: String = chars[i + 1..j - 1].iter().collect();
+                    for part in split_top_level_commas(&inner) {
+                        vars.extend(collect_identifiers_from_pattern(part.trim()));
                     }
                 }
                 i = j;
@@ -923,18 +944,27 @@ fn parse_destructure(code: &str) -> Option<Vec<String>> {
     }
     if rest.is_empty() { return None; }
 
-    let first = rest.chars().next()?;
-    if first == '(' || first == '[' || first == '{' || rest.starts_with("Some(") || rest.starts_with("Ok(") || rest.starts_with("Err(") {
-        let pattern = if let Some(eq) = rest.find('=') {
-            rest[..eq].trim()
-        } else {
-            rest
-        };
-        let vars = collect_identifiers_from_pattern(pattern);
-        if vars.is_empty() { None } else { Some(vars) }
+    let pattern = if let Some(eq) = rest.find('=') {
+        rest[..eq].trim()
     } else {
-        None
-    }
+        rest.trim()
+    };
+    if pattern.is_empty() { return None; }
+
+    let first = pattern.chars().next()?;
+    let is_destructure = if first == '(' || first == '[' || first == '{' {
+        true
+    } else if let Some(pos) = pattern.find(|c: char| c == '{' || c == '(' || c == '[') {
+        let prefix = pattern[..pos].trim();
+        !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '<' | '>' | ',' | ' '))
+    } else {
+        false
+    };
+    if !is_destructure { return None; }
+
+    let opener_pos = pattern.find(|c: char| c == '{' || c == '(' || c == '[')?;
+    let vars = collect_identifiers_from_pattern(&pattern[opener_pos..]);
+    if vars.is_empty() { None } else { Some(vars) }
 }
 
 fn parse_destructure_assign(code: &str) -> Option<Vec<String>> {
@@ -2193,6 +2223,70 @@ mod tests {
         write!(f, "safe_fn: fn_1\n").unwrap();
         let c = Config::load(path.to_str().unwrap()).unwrap();
         assert!(c.is_safe_fn("fn_1"), "value without # should be loaded as-is");
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    // =============================================
+    // Turbofish ::<> in patterns
+    // =============================================
+
+    #[test]
+    fn test_collect_identifiers_from_pattern_turbofish_skipped() {
+        let vars = collect_identifiers_from_pattern("Some::<T>(val)");
+        assert_eq!(vars, vec!["val"],
+                   "turbofish type param T should not be collected");
+    }
+
+    #[test]
+    fn test_parse_destructure_turbofish() {
+        let vars = parse_destructure("let Ok::<_, _>(val) = result").unwrap();
+        assert_eq!(vars, vec!["val"]);
+    }
+
+    #[test]
+    fn test_parse_destructure_struct_with_name() {
+        let vars = parse_destructure("let MyStruct { x, y } = val").unwrap();
+        assert_eq!(vars, vec!["x", "y"],
+                   "Struct {{ field }} should extract fields");
+    }
+
+    #[test]
+    fn test_parse_destructure_enum_variant() {
+        let vars = parse_destructure("let MyEnum::Variant(x) = val").unwrap();
+        assert_eq!(vars, vec!["x"],
+                   "Enum::Variant(x) should extract x");
+    }
+
+    // =============================================
+    // struct { field: ref x } pattern
+    // =============================================
+
+    #[test]
+    fn test_collect_identifiers_from_pattern_struct_ref_field() {
+        let vars = collect_identifiers_from_pattern("{ x: ref y, z }");
+        assert_eq!(vars, vec!["y", "z"],
+                   "ref in struct field should be skipped");
+    }
+
+    #[test]
+    fn test_collect_identifiers_from_pattern_struct_mut_field() {
+        let vars = collect_identifiers_from_pattern("{ x: mut y }");
+        assert_eq!(vars, vec!["y"],
+                   "mut in struct field should be skipped");
+    }
+
+    // =============================================
+    // Config empty value
+    // =============================================
+
+    #[test]
+    fn test_config_load_empty_value_skipped() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("_test_lifetime_config_empty.toml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(f, "safe_fn:\nprefix:\n").unwrap();
+        let c = Config::load(path.to_str().unwrap()).unwrap();
+        assert!(!c.is_safe_fn(""), "empty string should not be added as safe_fn");
         std::fs::remove_file(&path).unwrap();
     }
 }
