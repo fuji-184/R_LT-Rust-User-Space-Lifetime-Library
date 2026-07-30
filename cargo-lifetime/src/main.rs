@@ -86,30 +86,19 @@ fn find_inline_modules(src: &str) -> Vec<(String, String)> {
 }
 
 fn check_project(config: &Config) -> Vec<(String, usize, String)> {
-    let entry_path = if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
-        let main = std::path::Path::new(&manifest).join("src/main.rs");
-        let lib = std::path::Path::new(&manifest).join("src/lib.rs");
-        if main.exists() {
-            main
-        } else if lib.exists() {
-            lib
-        } else {
-            return Vec::new();
-        }
-    } else {
-        let root = std::env::current_dir().unwrap_or_default();
-        let mut dir = root.as_path();
-        loop {
-            let main = dir.join("src/main.rs");
-            if main.exists() { break main; }
-            let lib = dir.join("src/lib.rs");
-            if lib.exists() { break lib; }
-            if let Some(parent) = dir.parent() {
-                dir = parent;
-            } else {
-                return Vec::new();
-            }
-        }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut dir = cwd.as_path();
+    let root = loop {
+        if dir.join("Cargo.toml").exists() { break dir; }
+        if let Some(parent) = dir.parent() { dir = parent; }
+        else { return Vec::new(); }
+    };
+    let entry_path = {
+        let main = root.join("src/main.rs");
+        let lib = root.join("src/lib.rs");
+        if main.exists() { main }
+        else if lib.exists() { lib }
+        else { return Vec::new(); }
     };
 
     let mut all = Vec::new();
@@ -142,8 +131,13 @@ fn check_project(config: &Config) -> Vec<(String, usize, String)> {
                 }
             }
         }
+        let rel = std::path::Path::new(&path)
+            .strip_prefix(root)
+            .unwrap_or(std::path::Path::new(&path))
+            .to_string_lossy()
+            .into_owned();
         for (line, msg) in check_source_with_config(&src, config) {
-            all.push((path.clone(), line, msg));
+            all.push((rel.clone(), line, msg));
         }
     }
     all
