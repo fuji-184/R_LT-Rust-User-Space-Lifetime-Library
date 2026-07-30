@@ -225,33 +225,48 @@ fn smart_split(s: &str) -> Vec<String> {
     let mut depth_paren: isize = 0;
     let mut depth_bracket: isize = 0;
     let mut depth_brace: isize = 0;
-    let mut in_str = false;
     let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
 
-    for (i, &ch) in chars.iter().enumerate() {
-        match ch {
+    while i < chars.len() {
+        match chars[i] {
             '"' => {
-                let mut j = i;
-                j += 1;
-                while j < chars.len() {
-                    if chars[j] == '\\' { j += 2; continue; }
-                    if chars[j] == '"' { in_str = !in_str; break; }
-                    j += 1;
+                i += 1;
+                while i < chars.len() {
+                    if chars[i] == '\\' { i += 2; continue; }
+                    if chars[i] == '"' { break; }
+                    i += 1;
                 }
             }
-            '(' if !in_str => depth_paren += 1,
-            ')' if !in_str => depth_paren -= 1,
-            '[' if !in_str => depth_bracket += 1,
-            ']' if !in_str => depth_bracket -= 1,
-            '{' if !in_str => depth_brace += 1,
-            '}' if !in_str => depth_brace -= 1,
-            ';' if !in_str && depth_paren == 0 && depth_bracket == 0 && depth_brace == 0 => {
+            '/' if i + 1 < chars.len() => {
+                if chars[i + 1] == '/' {
+                    let seg: String = s[start..i].trim().to_string();
+                    if !seg.is_empty() { parts.push(seg); }
+                    return parts;
+                }
+                if chars[i + 1] == '*' {
+                    i += 2;
+                    loop {
+                        if i + 1 >= chars.len() { break; }
+                        if chars[i] == '*' && chars[i + 1] == '/' { i += 1; break; }
+                        i += 1;
+                    }
+                }
+            }
+            '(' => depth_paren += 1,
+            ')' => depth_paren -= 1,
+            '[' => depth_bracket += 1,
+            ']' => depth_bracket -= 1,
+            '{' => depth_brace += 1,
+            '}' => depth_brace -= 1,
+            ';' if depth_paren == 0 && depth_bracket == 0 && depth_brace == 0 => {
                 let seg: String = s[start..i].trim().to_string();
                 if !seg.is_empty() { parts.push(seg); }
                 start = i + 1;
             }
             _ => {}
         }
+        i += 1;
     }
 
     let seg: String = s[start..].trim().to_string();
@@ -329,18 +344,31 @@ pub fn check_source_with_config(src: &str, config: &Config) -> Vec<(usize, Strin
 
 fn strip_cfg_test<'a>(s: &'a str) -> Option<&'a str> {
     if !s.starts_with("#[cfg(") { return None; }
-    let end = find_matching_paren(s, 5);
-    match end {
-        Some(pos) => {
-            let inner = &s[6..pos];
-            if inner.contains("test") {
-                let rest = s[pos + 1..].trim();
-                if rest.is_empty() { Some("") } else { Some(rest) }
-            } else {
-                None
-            }
+    let end = find_matching_paren(s, 5)?;
+    let inner = &s[6..end];
+    if cfg_predicate_has_test(inner) {
+        if !s[end + 1..].starts_with(']') { return None; }
+        let rest = s[end + 2..].trim();
+        if rest.is_empty() { Some("") } else { Some(rest) }
+    } else {
+        None
+    }
+}
+
+fn cfg_predicate_has_test(pred: &str) -> bool {
+    let pred = pred.trim();
+    if pred == "test" { return true; }
+    if pred.starts_with("not(") { return false; }
+    if pred.starts_with("all(") || pred.starts_with("any(") {
+        let paren = pred.find('(').unwrap_or(0);
+        if let Some(end) = find_matching_paren(pred, paren) {
+            let body = &pred[paren + 1..end];
+            split_top_level_commas(body).iter().any(|a| cfg_predicate_has_test(a.trim()))
+        } else {
+            false
         }
-        None => None
+    } else {
+        pred.contains("test")
     }
 }
 
@@ -540,9 +568,19 @@ impl Scanner {
             return;
         }
 
+        if let Some(vars) = parse_destructure_assign(code) {
+            for var in &vars {
+                self.owners.retain(|o| o.var != *var);
+                self.borrows.retain(|b| b.var != *var);
+            }
+            return;
+        }
+
         if let Some((var, _expr, label)) = parse_lt_assign(code) {
             let decl_d = self.var_depth.get(&var).copied().unwrap_or(self.depth);
             let eff_d = decl_d.min(self.depth);
+            self.owners.retain(|o| o.var != var);
+            self.borrows.retain(|b| b.var != var);
             self.borrows.push(Borrow { var, label, line, depth: eff_d });
             return;
         }
@@ -647,18 +685,8 @@ impl Scanner {
 fn extract_paren_body(s: &str) -> Option<&str> {
     let s = s.trim();
     if !s.starts_with('(') { return None; }
-    let mut depth: isize = 0;
-    for (i, ch) in s.char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 { return Some(&s[1..i]); }
-            }
-            _ => {}
-        }
-    }
-    None
+    let end = find_matching_paren(s, 0)?;
+    Some(&s[1..end])
 }
 
 fn split_top_level_commas(s: &str) -> Vec<&str> {
@@ -841,6 +869,27 @@ fn parse_destructure(code: &str) -> Option<Vec<String>> {
     }
 }
 
+fn parse_destructure_assign(code: &str) -> Option<Vec<String>> {
+    let c = code.trim();
+    if c.starts_with("let ") { return None; }
+    if c.starts_with("for ") { return None; }
+    let eq = find_non_relational_eq(c)?;
+    let pattern = c[..eq].trim();
+    if pattern.is_empty() { return None; }
+    if !pattern.contains('{') && !pattern.contains('(') && !pattern.contains('[') {
+        return None;
+    }
+    let mut vars = collect_identifiers_from_pattern(pattern);
+    // Strip leading type/variant identifier before { or (
+    if let Some(brace_pos) = pattern.find(|c: char| c == '{' || c == '(' || c == '[') {
+        let before = pattern[..brace_pos].trim();
+        if !before.is_empty() && !vars.is_empty() && vars[0] == before {
+            vars.remove(0);
+        }
+    }
+    if vars.is_empty() { None } else { Some(vars) }
+}
+
 fn parse_lt_assign(code: &str) -> Option<(String, String, String)> {
     let c = code.trim();
     if c.starts_with("let ") { return None; }
@@ -869,19 +918,8 @@ fn find_non_relational_eq(s: &str) -> Option<usize> {
 
 fn extract_lt_expr_label(s: &str) -> Option<(String, String)> {
     if !s.starts_with("lt!(") { return None; }
-    let body_start = &s[4..];
-    let mut depth: isize = 0;
-    let mut end = None;
-    for (i, ch) in body_start.char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' if depth == 0 => { end = Some(i); break; }
-            ')' => depth -= 1,
-            _ => {}
-        }
-    }
-    let end = end?;
-    let body = body_start[..end].trim();
+    let end = find_matching_paren(s, 3)?;
+    let body = s[4..end].trim();
     let last_comma = find_last_comma(body)?;
     let expr = body[..last_comma].trim().to_string();
     let label_raw = body[last_comma + 1..].trim();
@@ -911,11 +949,10 @@ fn find_last_comma(s: &str) -> Option<usize> {
 fn parse_drop(code: &str) -> Option<String> {
     let c = code.trim();
     if !c.starts_with("drop(") { return None; }
-    let rest = &c[5..];
-    let paren = rest.find(')')?;
-    let var = rest[..paren].trim();
-    if var.is_empty() { return None; }
-    Some(var.to_string())
+    let end = find_matching_paren(c, 4)?;
+    let body = c[5..end].trim();
+    if body.is_empty() { return None; }
+    Some(body.to_string())
 }
 
 pub fn is_ident(s: &str) -> bool {
@@ -924,6 +961,35 @@ pub fn is_ident(s: &str) -> bool {
     let first = chars.next().unwrap();
     if !first.is_ascii_alphabetic() && first != '_' { return false; }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+pub fn strip_config(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--config" {
+            i += 2;
+        } else {
+            out.push(args[i].clone());
+            i += 1;
+        }
+    }
+    out
+}
+
+pub fn load_config(args: &[String]) -> Result<Config, String> {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--config" {
+            if let Some(path) = args.get(i + 1) {
+                return Config::load(path);
+            } else {
+                return Err("--config requires a path argument".to_string());
+            }
+        }
+        i += 1;
+    }
+    Ok(Config::new())
 }
 
 #[cfg(test)]
@@ -1054,5 +1120,320 @@ mod tests {
         let custom_errors = check_source_with_config(src, &custom_config);
         assert!(default_errors.is_empty(), "custom_ref not recognized with default config");
         assert!(!custom_errors.is_empty(), "custom_ref recognized as borrow with custom suffix");
+    }
+
+    // --- smart_split ---
+
+    #[test]
+    fn test_smart_split_semicolons() {
+        let parts = smart_split("a; b; c");
+        assert_eq!(parts, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_smart_split_string_preserves_semicolon() {
+        let parts = smart_split(r#"println!("hello; world"); next"#);
+        assert_eq!(parts, vec![r#"println!("hello; world")"#, "next"]);
+    }
+
+    #[test]
+    fn test_smart_split_string_protects_semicolon() {
+        let parts = smart_split(r#"a; "b;c"; d"#);
+        assert_eq!(parts, vec!["a", r#""b;c""#, "d"]);
+    }
+
+    #[test]
+    fn test_smart_split_escaped_quote() {
+        let parts = smart_split(r#"a; "foo\"bar"; b"#);
+        assert_eq!(parts, vec!["a", r#""foo\"bar""#, "b"]);
+    }
+
+    // --- find_matching_paren ---
+
+    #[test]
+    fn test_find_matching_paren_basic() {
+        assert_eq!(find_matching_paren("(a, b)", 0), Some(5));
+    }
+
+    #[test]
+    fn test_find_matching_paren_nested() {
+        assert_eq!(find_matching_paren("(foo(bar))", 0), Some(9));
+    }
+
+    #[test]
+    fn test_find_matching_paren_string_skips_paren() {
+        assert_eq!(find_matching_paren(r#"("foo)", bar)"#, 0), Some(12));
+    }
+
+    #[test]
+    fn test_find_matching_paren_comment_skips_paren() {
+        assert_eq!(find_matching_paren("(/* ) */ )", 0), Some(9));
+    }
+
+    // --- parse_drop ---
+
+    #[test]
+    fn test_parse_drop_simple() {
+        assert_eq!(parse_drop("drop(val)"), Some("val".to_string()));
+    }
+
+    #[test]
+    fn test_parse_drop_nested() {
+        assert_eq!(parse_drop("drop(Box::into_raw(box))"), Some("Box::into_raw(box)".to_string()));
+    }
+
+    #[test]
+    fn test_parse_drop_no_drop() {
+        assert_eq!(parse_drop("observe(val)"), None);
+    }
+
+    // --- extract_paren_body ---
+
+    #[test]
+    fn test_extract_paren_body_basic() {
+        assert_eq!(extract_paren_body("(a, b)"), Some("a, b"));
+    }
+
+    #[test]
+    fn test_extract_paren_body_nested() {
+        assert_eq!(extract_paren_body("(foo(bar), baz)"), Some("foo(bar), baz"));
+    }
+
+    #[test]
+    fn test_extract_paren_body_with_string() {
+        assert_eq!(extract_paren_body(r#"("foo)", bar)"#), Some(r#""foo)", bar"#));
+    }
+
+    // --- extract_lt_expr_label ---
+
+    #[test]
+    fn test_extract_lt_expr_label_simple() {
+        assert_eq!(extract_lt_expr_label(r#"lt!(val.as_ptr(), "l")"#),
+                   Some(("val.as_ptr()".to_string(), "l".to_string())));
+    }
+
+    #[test]
+    fn test_extract_lt_expr_label_nested_expr() {
+        assert_eq!(extract_lt_expr_label(r#"lt!(MyBox::new(&val), "l")"#),
+                   Some(("MyBox::new(&val)".to_string(), "l".to_string())));
+    }
+
+    #[test]
+    fn test_extract_lt_expr_label_paren_in_string() {
+        assert_eq!(extract_lt_expr_label(r#"lt!(concat!("foo)"), "l")"#),
+                   Some(("concat!(\"foo)\")".to_string(), "l".to_string())));
+    }
+
+    #[test]
+    fn test_extract_lt_expr_label_no_label() {
+        assert_eq!(extract_lt_expr_label("lt!(val)"), None);
+    }
+
+    // --- find_last_comma ---
+
+    #[test]
+    fn test_find_last_comma_basic() {
+        assert_eq!(find_last_comma("a, b"), Some(1));
+    }
+
+    #[test]
+    fn test_find_last_comma_skips_nested() {
+        assert_eq!(find_last_comma("foo(bar), baz"), Some(8));
+    }
+
+    #[test]
+    fn test_find_last_comma_skips_string() {
+        let s = r#"foo, "b,ar", baz"#;
+        assert_eq!(find_last_comma(s), Some(11));
+    }
+
+    // --- cfg_predicate_has_test ---
+
+    #[test]
+    fn test_cfg_predicate_test_exact() {
+        assert!(cfg_predicate_has_test("test"));
+    }
+
+    #[test]
+    fn test_cfg_predicate_not_test() {
+        assert!(!cfg_predicate_has_test("not(test)"));
+    }
+
+    #[test]
+    fn test_cfg_predicate_all_test() {
+        assert!(cfg_predicate_has_test("all(target_os = \"linux\", test)"));
+    }
+
+    #[test]
+    fn test_cfg_predicate_any_test() {
+        assert!(cfg_predicate_has_test("any(test, target_os = \"windows\")"));
+    }
+
+    // --- strip_cfg_test ---
+
+    #[test]
+    fn test_strip_cfg_test_simple() {
+        assert_eq!(strip_cfg_test("#[cfg(test)] fn f() {}"), Some("fn f() {}"));
+    }
+
+    #[test]
+    fn test_strip_cfg_test_not() {
+        assert_eq!(strip_cfg_test("#[cfg(not(test))] fn f() {}"), None);
+    }
+
+    #[test]
+    fn test_strip_cfg_test_all() {
+        assert_eq!(strip_cfg_test("#[cfg(all(test, feature = \"foo\"))] fn f() {}"), Some("fn f() {}"));
+    }
+
+    #[test]
+    fn test_strip_cfg_test_no_bracket_returns_none() {
+        assert_eq!(strip_cfg_test("#[cfg(test) fn f() {}"), None);
+    }
+
+    // --- parse_lt_assign dedup ---
+
+    #[test]
+    fn test_lt_assign_replaces_previous_track() {
+        let src = "let x = lt!(vec![1], \"l\");\nlet p = lt!(x.as_ptr(), \"l\");\nx = lt!(vec![2], \"l\");\ndrop(x);\n";
+        let config = Config::new().add_safe_fn("drop");
+        let errors = check_source_with_config(src, &config);
+        assert!(errors.is_empty(), "x reassignment should replace old owner, no borrow conflict");
+    }
+
+    // --- parse_destructure_assign ---
+
+    #[test]
+    fn test_parse_destructure_assign_tuple() {
+        assert_eq!(parse_destructure_assign("(a, b) = expr"), Some(vec!["a".to_string(), "b".to_string()]));
+    }
+
+    #[test]
+    fn test_parse_destructure_assign_array() {
+        assert_eq!(parse_destructure_assign("[a, b] = expr"), Some(vec!["a".to_string(), "b".to_string()]));
+    }
+
+    #[test]
+    fn test_parse_destructure_assign_struct() {
+        let vars = parse_destructure_assign("Struct { x, y } = expr").unwrap();
+        assert_eq!(vars, vec!["x".to_string(), "y".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_destructure_assign_skips_let() {
+        assert_eq!(parse_destructure_assign("let (a, b) = expr"), None);
+    }
+
+    #[test]
+    fn test_parse_destructure_assign_skips_for() {
+        assert_eq!(parse_destructure_assign("for (a, b) in expr"), None);
+    }
+
+    // --- find_non_relational_eq ---
+
+    #[test]
+    fn test_find_non_relational_eq_simple() {
+        assert_eq!(find_non_relational_eq("x = 1"), Some(2));
+    }
+
+    #[test]
+    fn test_find_non_relational_eq_skips_compare() {
+        assert_eq!(find_non_relational_eq("x == 1"), None);
+        assert_eq!(find_non_relational_eq("x != 1"), None);
+    }
+
+    #[test]
+    fn test_find_non_relational_eq_skips_string() {
+        let s = r#"x "=" = 1"#;
+        assert_eq!(find_non_relational_eq(s), Some(6));
+    }
+
+    // --- check_source with string in expression ---
+
+    #[test]
+    fn test_check_source_label_with_paren() {
+        let src = r#"let val = lt!(vec![1], "foo)bar"); let p = lt!(val.as_ptr(), "foo)bar"); my_fn(val);"#;
+        let errors = check_source_with_config(src, &Config::default());
+        assert!(!errors.is_empty(), "label with ) inside should not break owner/borrow pairing");
+    }
+
+    #[test]
+    fn test_check_source_comma_in_nested_vec() {
+        let src = r#"let val = lt!(vec![1, 2], "l"); let p = lt!(val.as_ptr(), "l"); my_fn(val);"#;
+        let errors = check_source_with_config(src, &Config::default());
+        assert!(!errors.is_empty(), "comma in nested vec![1,2] should not break label parsing");
+    }
+
+    // --- is_ident ---
+
+    #[test]
+    fn test_is_ident_valid() {
+        assert!(is_ident("foo"));
+        assert!(is_ident("_bar"));
+        assert!(is_ident("baz123"));
+    }
+
+    #[test]
+    fn test_is_ident_invalid() {
+        assert!(!is_ident(""));
+        assert!(!is_ident("123abc"));
+        assert!(!is_ident("foo bar"));
+    }
+
+    // --- strip_config ---
+
+    #[test]
+    fn test_strip_config_removes_config_flag() {
+        let args = vec!["prog".to_string(), "--config".to_string(), "path.toml".to_string(), "check".to_string()];
+        assert_eq!(strip_config(&args), vec!["prog", "check"]);
+    }
+
+    #[test]
+    fn test_strip_config_no_config() {
+        let args = vec!["prog".to_string(), "check".to_string(), "file.rs".to_string()];
+        assert_eq!(strip_config(&args), vec!["prog", "check", "file.rs"]);
+    }
+
+    #[test]
+    fn test_strip_config_multiple_config() {
+        let args = vec!["prog".to_string(), "--config".to_string(), "a.toml".to_string(), "check".to_string(), "--config".to_string(), "b.toml".to_string()];
+        assert_eq!(strip_config(&args), vec!["prog", "check"]);
+    }
+
+    // --- load_config ---
+
+    #[test]
+    fn test_load_config_no_args_returns_default() {
+        let args: Vec<String> = vec!["prog".to_string()];
+        let config = load_config(&args).unwrap();
+        assert!(!config.is_safe_fn("some_fn"));
+        assert!(!config.is_pointer_expr("some_ptr()"));
+    }
+
+    #[test]
+    fn test_load_config_with_valid_config() {
+        let dir = std::env::temp_dir();
+        let config_path = dir.join("_test_load_config_args_valid.toml");
+        let mut f = std::fs::File::create(&config_path).unwrap();
+        write!(f, "safe_fn: custom_fn\nprefix: Ctx::new(\n").unwrap();
+        let args = vec!["prog".to_string(), "--config".to_string(), config_path.to_str().unwrap().to_string(), "check".to_string()];
+        let config = load_config(&args).unwrap();
+        assert!(config.is_safe_fn("custom_fn"));
+        assert!(config.is_pointer_expr("Ctx::new(x)"));
+        std::fs::remove_file(&config_path).unwrap();
+    }
+
+    #[test]
+    fn test_load_config_invalid_path_returns_err() {
+        let args = vec!["prog".to_string(), "--config".to_string(), "/nonexistent/path.toml".to_string()];
+        let result = load_config(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_config_missing_path_returns_err() {
+        let args = vec!["prog".to_string(), "--config".to_string()];
+        let result = load_config(&args);
+        assert!(result.is_err());
     }
 }

@@ -139,28 +139,26 @@ fn print_usage() {
     eprintln!("  cargo lifetime --help                    Show this help");
 }
 
-fn load_config(args: &[String]) -> Config {
-    let mut config = Config::new();
-    let mut i = 2;
-    while i < args.len() {
-        if args[i] == "--config" {
-            if let Some(path) = args.get(i + 1) {
-                match Config::load(path) {
-                    Ok(c) => { config = c; i += 2; continue; }
-                    Err(e) => { eprintln!("error: {}", e); std::process::exit(1); }
-                }
-            } else {
-                eprintln!("error: --config requires a path argument");
-                std::process::exit(1);
-            }
-        }
-        i += 1;
-    }
-    config
-}
-
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let raw: Vec<String> = std::env::args().collect();
+    let config = match lifetime_cli::load_config(&raw) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let args = lifetime_cli::strip_config(&raw);
+
+    let config = if !raw.iter().any(|a| a == "--config") {
+        if let Ok(c) = Config::load(".lifetime.toml") {
+            c
+        } else {
+            config
+        }
+    } else {
+        config
+    };
 
     match args.get(1).map(|s| s.as_str()) {
         Some("--help") | Some("-h") => {
@@ -168,7 +166,6 @@ fn main() {
             return;
         }
         Some("check") => {
-            let config = load_config(&args);
             match args.get(2).map(|s| s.as_str()) {
                 Some("--help") | Some("-h") => {
                     eprintln!("Usage: cargo lifetime check [--file <path> | --config <path> | <path>]");
